@@ -150,7 +150,14 @@ class Backtester:
         self.logger = logging.getLogger(__name__)
         
         # 初始化数据加载器
-        self.data_loader = DataLoader(config.data_dir)
+        # 直接使用修复版数据加载器
+        import sys
+        from pathlib import Path
+        project_root = Path(__file__).parent.parent.parent
+        sys.path.insert(0, str(project_root))
+        from scripts.fixed_data_loader import FixedDataLoader
+        self.data_loader = FixedDataLoader(config.data_dir)
+        self.use_fixed_loader = True
         
         # 账户状态
         self.balance = config.initial_balance
@@ -376,17 +383,19 @@ class Backtester:
         position = self.positions[symbol]
         
         # 计算滑点后的价格
-        if signal.signal_type == SignalType.BUY:
+        if signal.signal_type in [SignalType.OPEN_LONG]:
             execution_price = current_price * (1 + self.config.slippage)
-        elif signal.signal_type == SignalType.SELL:
+        elif signal.signal_type in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
             execution_price = current_price * (1 - self.config.slippage)
+        elif signal.signal_type in [SignalType.OPEN_SHORT]:
+            execution_price = current_price * (1 - self.config.slippage)  # 做空仓时价格向下
         else:
             execution_price = current_price
             
         # 执行交易
-        if signal.signal_type == SignalType.BUY:
-            # 买入
-            quantity = signal.quantity
+        if signal.signal_type in [SignalType.OPEN_LONG]:
+            # 开多仓
+            quantity = signal.amount if signal.amount is not None else signal.quantity
             cost = execution_price * quantity
             fee = cost * self.config.fee_rate
             total_cost = cost + fee
@@ -415,9 +424,9 @@ class Backtester:
             
             self.logger.info(f"买入 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 价值 {cost:.2f}, 手续费 {position_fee:.2f}")
             
-        elif signal.signal_type == SignalType.SELL:
-            # 卖出
-            quantity = min(signal.quantity, position.quantity)
+        elif signal.signal_type in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
+            # 平仓（平多仓或平空仓）
+            quantity = min(signal.amount if signal.amount is not None else signal.quantity, position.quantity)
             
             if quantity <= 0:
                 self.logger.warning(f"持仓不足，无法卖出 {symbol}, 持仓 {position.quantity}")
@@ -448,7 +457,7 @@ class Backtester:
             
             self.logger.info(f"卖出 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 价值 {revenue:.2f}, 手续费 {position_fee:.2f}, 已实现盈亏 {position.realized_pnl:.2f}")
             
-        elif signal.signal_type == SignalType.CLOSE:
+        elif signal.signal_type in [SignalType.CLOSE, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
             # 平仓
             if position.quantity > 0:
                 # 全部卖出

@@ -23,18 +23,19 @@ class SignalType(Enum):
 class Signal:
     """交易信号类"""
     
-    def __init__(self, signal_type: SignalType, symbol: str, price: float = None, 
-                 amount: float = None, confidence: float = 1.0, 
-                 stop_loss: float = None, take_profit: float = None, 
+    def __init__(self, signal_type: SignalType, symbol: str, price: float = None,
+                 amount: float = None, quantity: float = None, confidence: float = 1.0,
+                 stop_loss: float = None, take_profit: float = None,
                  metadata: Dict = None):
         """
         初始化交易信号
-        
+
         Args:
             signal_type: 信号类型
             symbol: 交易对
             price: 建议价格
-            amount: 建议数量
+            amount: 建议数量（与quantity同义，兼容性）
+            quantity: 建议数量
             confidence: 信号置信度，范围[0,1]
             stop_loss: 止损价格
             take_profit: 止盈价格
@@ -43,7 +44,9 @@ class Signal:
         self.signal_type = signal_type
         self.symbol = symbol
         self.price = price
-        self.amount = amount
+        # 优先使用amount，如果没有则使用quantity
+        self.amount = amount if amount is not None else quantity
+        self.quantity = self.amount  # 保持向后兼容
         self.confidence = confidence
         self.stop_loss = stop_loss
         self.take_profit = take_profit
