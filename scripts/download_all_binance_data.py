@@ -199,12 +199,12 @@ def main():
     print("=" * 80)
 
     # 配置参数
-    data_dir = project_root / "data" / "binance"
+    data_dir = project_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     start_date = "2018-01-01"
     end_date = datetime.now().strftime('%Y-%m-%d')
-    timeframe = "1d"
+    timeframe = "15m"
 
     print(f"📁 数据目录: {data_dir}")
     print(f"📅 时间范围: {start_date} 至 {end_date}")
@@ -237,7 +237,7 @@ def main():
         print("-" * 80)
 
         batch_size = 10  # 每批处理10个交易对
-        batch_delay = 30  # 批次间延迟30秒（避免API限制）
+        batch_delay = 10  # 批次间延迟30秒（避免API限制）
 
         for i in range(0, len(symbols), batch_size):
             if is_interrupted:
