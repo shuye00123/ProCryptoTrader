@@ -19,17 +19,19 @@ class DataManager:
     数据管理类，负责本地数据存储与更新，支持多时间框架
     """
     
-    def __init__(self, data_dir: str = "data", exchange: str = "binance"):
+    def __init__(self, data_dir: str = "data", exchange: str = "binance", market_type: str = "spot"):
         """
         初始化数据管理器
-        
+
         Args:
             data_dir: 数据存储目录
             exchange: 交易所名称
+            market_type: 市场类型，'spot' 现货 或 'future' 期货
         """
         self.data_dir = data_dir
         self.exchange = exchange
-        self.data_fetcher = DataFetcher(exchange)
+        self.market_type = market_type
+        self.data_fetcher = DataFetcher(exchange, market_type=market_type)
         
         # 创建数据目录结构
         self._create_dir_structure()
