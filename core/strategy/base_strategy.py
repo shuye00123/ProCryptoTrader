@@ -18,6 +18,7 @@ class SignalType(Enum):
     INCREASE_LONG = "increase_long"  # 加多仓
     INCREASE_SHORT = "increase_short"  # 加空仓
     HOLD = "hold"                # 持仓不动
+    CLOSE = "close"              # 平仓（通用）
 
 
 class Signal:
@@ -152,7 +153,23 @@ class BaseStrategy(ABC):
         # 状态变量
         self.current_data = {}  # 当前数据 {symbol: DataFrame}
         self.indicators = {}  # 技术指标 {symbol: {indicator_name: value}}
-    
+
+    def initialize(self, config: Dict):
+        """
+        初始化策略（兼容回测器）
+
+        Args:
+            config: 回测配置参数
+        """
+        # 更新策略配置
+        self.backtest_config = config
+        self.initial_balance = config.get("initial_balance", 10000)
+        self.start_date = config.get("start_date")
+        self.end_date = config.get("end_date")
+
+        # 标记为已初始化
+        self.is_initialized = True
+
     @abstractmethod
     def generate_signals(self, data: Dict[str, pd.DataFrame]) -> List[Signal]:
         """

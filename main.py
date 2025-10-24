@@ -113,6 +113,7 @@ class ProCryptoTrader:
             from core.backtest.backtester import Backtester, BacktestConfig
             from core.strategy.grid_strategy import GridStrategy
             from core.strategy.martingale_strategy import MartingaleStrategy
+            from core.strategy.enhanced_grid_strategy import EnhancedGridStrategy
 
             # 获取回测配置
             basic_config = config.get('basic', {})
@@ -130,7 +131,7 @@ class ProCryptoTrader:
                 slippage=trading_config.get('slippage', 0.0005),
                 symbols=data_config.get('symbols', ['BTC/USDT']),
                 timeframes=data_config.get('timeframes', ['1h']),
-                data_dir=data_config.get('data_dir', './data'),
+                data_dir=data_config.get('data_dir', './data') + '/' + data_config.get('exchange', 'binance'),
                 output_dir=output_config.get('output_dir', './results')
             )
 
@@ -149,6 +150,8 @@ class ProCryptoTrader:
 
             if strategy_name == 'GridStrategy':
                 strategy_instance = GridStrategy(strategy_params)
+            elif strategy_name == 'EnhancedGridStrategy':
+                strategy_instance = EnhancedGridStrategy(strategy_params)
             elif strategy_name == 'Martingale':
                 strategy_instance = MartingaleStrategy(strategy_params)
             else:
@@ -240,13 +243,21 @@ class ProCryptoTrader:
         try:
             from core.strategy.grid_strategy import GridStrategy
             from core.strategy.martingale_strategy import MartingaleStrategy
+            from core.strategy.enhanced_grid_strategy import EnhancedGridStrategy
 
             strategies = {
                 'GridStrategy': {
-                    'name': '网格策略',
+                    'name': '基础网格策略',
                     'description': '在价格区间内设置网格，低买高卖获取收益',
                     'suitable': '震荡行情',
                     'config_file': 'backtest_config.yaml'
+                },
+                'EnhancedGridStrategy': {
+                    'name': '增强网格策略',
+                    'description': '支持做多/做空方向配置的增强网格策略',
+                    'suitable': '震荡行情、趋势行情',
+                    'config_file': 'enhanced_grid_backtest_config.yaml',
+                    'features': ['方向配置', '网格重平衡', '趋势确认']
                 },
                 'Martingale': {
                     'name': '马丁格尔策略',

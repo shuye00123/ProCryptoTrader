@@ -1,0 +1,33 @@
+basic:
+  end_date: '2024-12-31'
+  initial_balance: 10000
+  start_date: '2024-01-01'
+data:
+  data_dir: ./data
+  exchange: binance
+  symbols:
+  - BTC-USDT
+  timeframes:
+  - 1h
+output:
+  output_dir: ./results_improved
+strategy:
+  name: EnhancedGridStrategy
+  params:
+    direction: both
+    enable_grid_rebalance: true
+    grid_count: 15
+    grid_range_pct: 0.03
+    grid_rebalance_threshold: 0.1
+    min_price_change_pct: 0.0005
+    name: EnhancedGridStrategy_Improved
+    position_size: 0.02
+    stop_loss_pct: 0.02
+    symbols:
+    - BTC-USDT
+    take_profit_pct: 0.015
+trading:
+  commission: 0.001
+  leverage: 1
+  position_size: 0.1
+  slippage: 0.0005
