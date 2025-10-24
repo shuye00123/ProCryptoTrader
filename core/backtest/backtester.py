@@ -296,16 +296,23 @@ class Backtester:
                         
                 if not current_data:
                     continue
-                    
+
+                # 为策略转换数据键格式 (symbol_timeframe -> symbol)
+                strategy_data = {}
+                for key, df in current_data.items():
+                    # 从 "BTC/USDT_1d" 提取 "BTC/USDT"
+                    symbol = key.rsplit('_', 1)[0]
+                    strategy_data[symbol] = df
+
                 # 更新持仓价格
-                self._update_positions(current_data)
-                
+                self._update_positions(strategy_data)
+
                 # 计算当前权益
                 equity = self._calculate_equity(current_data)
                 self.equity_curve.append((timestamp, equity))
-                
+
                 # 生成交易信号
-                signals = self.strategy.generate_signals(current_data)
+                signals = self.strategy.generate_signals(strategy_data)
                 
                 # 执行交易信号
                 for signal in signals:
@@ -319,8 +326,14 @@ class Backtester:
             final_data = {}
             for key, df in data.items():
                 final_data[key] = df.copy()
-                
-            self._update_positions(final_data)
+
+            # 为持仓更新转换数据键格式
+            strategy_final_data = {}
+            for key, df in final_data.items():
+                symbol = key.rsplit('_', 1)[0]
+                strategy_final_data[symbol] = df
+
+            self._update_positions(strategy_final_data)
             final_equity = self._calculate_equity(final_data)
             
             # 生成回测结果

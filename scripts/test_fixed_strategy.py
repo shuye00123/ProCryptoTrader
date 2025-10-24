@@ -77,7 +77,7 @@ def test_indicator_calculation():
 
         # 加载测试数据
         loader = FixedDataLoader()
-        data = loader.load_data('BTC/USDT', '1d', '2024-01-01', '2024-01-31')
+        data = loader.load_data('BTC/USDT', '1d', '2024-01-01', '2025-01-01')
 
         if data.empty:
             print(f"❌ 无法加载测试数据")
@@ -155,7 +155,7 @@ def test_signal_generation():
             'initial_balance': 10000,
             'symbols': ['BTC/USDT'],
             'start_date': '2024-01-01',
-            'end_date': '2024-03-31'
+            'end_date': '2025-01-31'
         })
 
         # 测试信号生成
