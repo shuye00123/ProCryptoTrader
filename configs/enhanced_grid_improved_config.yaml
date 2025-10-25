@@ -8,7 +8,7 @@ data:
   symbols:
   - BTC-USDT
   timeframes:
-  - 1h
+  - 15m
 output:
   output_dir: ./results_improved
 strategy:
