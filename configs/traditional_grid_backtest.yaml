@@ -1,0 +1,76 @@
+# 传统网格策略回测配置文件
+
+# 基本设置
+basic:
+  start_date: "2024-01-01"     # 回测开始日期
+  end_date: "2025-09-30"       # 回测结束日期 (扩展到1个月以获得更大价格变化)
+  initial_balance: 10000      # 初始资金
+  benchmark: "BTC/USDT"        # 基准标的
+
+# 数据设置
+data:
+  exchange: "binance"          # 交易所
+  symbols:
+    - "BTC/USDT"              # 交易对
+  timeframes:
+    - "15m"                   # 时间框架
+  data_dir: "./data"          # 数据目录
+
+# 策略设置
+strategy:
+  name: "TraditionalGridStrategy"    # 策略名称
+  class: "TraditionalGridStrategy"   # 策略类名
+  params:
+    # 传统网格参数
+    grid_count: 100               # 网格数量 (减少网格密度避免过度频繁交易)
+    position_size: 0.01           # 仓位大小 2%
+    max_positions: 50             # 最大持仓数量
+
+    # 固定价格边界
+    absolute_upper_price: 120000.0  # 固定上限价格
+    absolute_lower_price: 30000.0  # 固定下限价格
+    base_price: 42488.0            # 固定基准价格 (基于2024年1月1日第一笔价格)
+
+    # 风险控制
+    stop_loss_pct: 0.10          # 止损 10%
+    take_profit_pct: 0.25        # 止盈 25%
+
+# 交易设置
+trading:
+  commission: 0.001            # 手续费率 0.1%
+  slippage: 0.0005             # 滑点 0.05%
+  leverage: 1                  # 杠杆倍数
+  position_size: 0.01          # 仓位大小 (与策略参数一致)
+  max_position_size: 0.5       # 最大仓位大小 50%
+
+# 风控设置
+risk:
+  max_drawdown: 0.25           # 最大回撤 25%
+  max_loss_per_trade: 0.05     # 单笔最大亏损 5%
+  max_loss_per_day: 0.10       # 单日最大亏损 10%
+  max_open_positions: 550        # 最大持仓数量
+
+# 输出设置
+output:
+  save_trades: true            # 保存交易记录
+  save_performance: true       # 保存绩效指标
+  save_plots: true             # 保存图表
+  output_dir: "./results/traditional_grid"  # 输出目录
+  plot_format: "png"           # 图表格式
+
+# 日志设置
+logging:
+  level: "INFO"                # 日志级别
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/traditional_grid_backtest.log"  # 日志文件
+  console: true                # 控制台输出
+
+# 并行设置
+parallel:
+  enabled: false               # 是否启用并行
+  n_jobs: 4                    # 并行任务数
+
+# 其他设置
+misc:
+  random_seed: 42              # 随机种子
+  verbose: true                # 详细输出

@@ -81,12 +81,18 @@ class Position:
     unrealized_pnl: float = 0.0  # 未实现盈亏
     realized_pnl: float = 0.0  # 已实现盈亏
     last_price: float = 0.0  # 最新价格
+    margin_used: float = 0.0  # 使用的保证金（仅空仓）
     
     def update_price(self, price: float):
         """更新最新价格并计算未实现盈亏"""
         self.last_price = price
         if self.quantity != 0:
-            self.unrealized_pnl = (price - self.avg_price) * self.quantity
+            if self.quantity > 0:
+                # 多仓未实现盈亏
+                self.unrealized_pnl = (price - self.avg_price) * self.quantity
+            else:
+                # 空仓未实现盈亏
+                self.unrealized_pnl = (self.avg_price - price) * abs(self.quantity)
             
     def execute_trade(self, side: str, price: float, quantity: float, fee_rate: float) -> float:
         """执行交易并返回手续费"""
@@ -95,41 +101,90 @@ class Position:
             cost = price * quantity
             fee = cost * fee_rate
             total_cost = cost + fee
-            
+
             if self.quantity == 0:
-                # 新建仓位
+                # 新建多仓
                 self.avg_price = price
-            else:
-                # 加仓
+                self.quantity = quantity
+            elif self.quantity > 0:
+                # 加多仓
                 total_value = self.quantity * self.avg_price + cost
                 self.quantity += quantity
                 self.avg_price = total_value / self.quantity
-                
-            self.quantity += quantity
+            elif self.quantity < 0:
+                # 平空仓
+                if quantity > abs(self.quantity):
+                    # 平空仓后还有剩余，转为多仓
+                    close_quantity = abs(self.quantity)
+                    remaining_quantity = quantity - close_quantity
+
+                    # 平空仓的盈亏
+                    realized = (self.avg_price - price) * close_quantity
+                    self.realized_pnl += realized
+
+                    # 剩余部分建多仓
+                    self.quantity = remaining_quantity
+                    self.avg_price = price
+
+                    fee = (price * close_quantity + price * remaining_quantity) * fee_rate
+                else:
+                    # 部分平空仓
+                    realized = (self.avg_price - price) * quantity  # 正确计算平空仓的盈亏
+                    self.realized_pnl += realized
+                    self.quantity += quantity  # quantity是正数，所以是减少空头仓位（向零靠近）
+
+                    # 如果完全平仓，重置保证金和均价
+                    if self.quantity == 0:
+                        self.margin_used = 0.0
+                        self.avg_price = 0.0
+
             return fee
-            
+
         elif side == "sell":
             # 卖出
-            if quantity > self.quantity:
-                raise ValueError("卖出数量不能超过持仓数量")
-                
             revenue = price * quantity
             fee = revenue * fee_rate
-            net_revenue = revenue - fee
-            
-            # 计算已实现盈亏
-            realized = (price - self.avg_price) * quantity
-            self.realized_pnl += realized
-            
-            # 更新持仓
-            self.quantity -= quantity
-            
-            # 如果全部卖出，重置平均价格
+
             if self.quantity == 0:
-                self.avg_price = 0.0
-                
+                # 新建空仓
+                self.avg_price = price
+                self.quantity = -quantity  # 空仓用负数表示
+                # 保证金管理由Backtester负责，不在Position中处理
+            elif self.quantity > 0:
+                # 平多仓
+                if quantity > self.quantity:
+                    # 平多仓后还有剩余，转为空仓
+                    close_quantity = self.quantity
+                    remaining_quantity = quantity - close_quantity
+
+                    # 平多仓的盈亏
+                    realized = (price - self.avg_price) * close_quantity
+                    self.realized_pnl += realized
+
+                    # 剩余部分建空仓
+                    self.quantity = -remaining_quantity
+                    self.avg_price = price
+                    # 保证金管理由Backtester负责，不在Position中处理
+
+                    fee = (price * close_quantity + price * remaining_quantity) * fee_rate
+                else:
+                    # 部分平多仓
+                    realized = (price - self.avg_price) * quantity
+                    self.realized_pnl += realized
+                    self.quantity -= quantity
+
+                    # 如果完全平仓，重置均价
+                    if self.quantity == 0:
+                        self.avg_price = 0.0
+            elif self.quantity < 0:
+                # 加空仓
+                total_value = abs(self.quantity) * self.avg_price + revenue
+                self.quantity -= quantity  # quantity是正数，空仓加仓
+                self.avg_price = total_value / abs(self.quantity)
+                # 保证金管理由Backtester负责，不在Position中处理
+
             return fee
-            
+
         else:
             raise ValueError("交易方向必须是'buy'或'sell'")
 
@@ -307,17 +362,17 @@ class Backtester:
                 # 更新持仓价格
                 self._update_positions(strategy_data)
 
-                # 计算当前权益
-                equity = self._calculate_equity(current_data)
-                self.equity_curve.append((timestamp, equity))
-
                 # 生成交易信号
                 signals = self.strategy.generate_signals(strategy_data)
-                
+
                 # 执行交易信号
                 for signal in signals:
                     self._execute_signal(signal, current_data)
-                    
+
+                # 计算当前权益（在交易执行后）
+                equity = self._calculate_equity(current_data)
+                self.equity_curve.append((timestamp, equity))
+
                 # 定期输出进度
                 if i % 1000 == 0:
                     self.logger.info(f"回测进度: {i}/{len(time_series)}, 当前时间: {timestamp}, 权益: {equity:.2f}")
@@ -360,18 +415,28 @@ class Backtester:
                     break
                     
     def _calculate_equity(self, data: Dict[str, pd.DataFrame]) -> float:
-        """计算当前权益"""
+        """计算当前权益 - 修正了空仓权益计算"""
         equity = self.balance
-        
+
         for symbol, position in self.positions.items():
             if position.quantity != 0:
                 # 获取最新价格
                 for key, df in data.items():
                     if symbol in key and not df.empty:
                         latest_price = df.iloc[-1]['close']
-                        equity += position.quantity * latest_price
+
+                        if position.quantity > 0:
+                            # 多仓：权益 = 持仓数量 * 当前价格
+                            position_value = position.quantity * latest_price
+                            equity += position_value
+                        elif position.quantity < 0:
+                            # 空仓：权益 = 保证金 + 未实现盈亏 + 已实现盈亏
+                            short_quantity = abs(position.quantity)
+                            unrealized_pnl = (position.avg_price - latest_price) * short_quantity
+                            position_value = position.margin_used + unrealized_pnl + position.realized_pnl
+                            equity += position_value
                         break
-                        
+
         return equity
         
     def _execute_signal(self, signal: Signal, data: Dict[str, pd.DataFrame]):
@@ -396,12 +461,12 @@ class Backtester:
         position = self.positions[symbol]
         
         # 计算滑点后的价格
-        if signal.signal_type in [SignalType.OPEN_LONG]:
+        if signal.signal_type in [SignalType.OPEN_LONG, SignalType.INCREASE_LONG]:
+            # 买入操作（开多仓/加多仓）价格向上滑
             execution_price = current_price * (1 + self.config.slippage)
-        elif signal.signal_type in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
+        elif signal.signal_type in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT, SignalType.INCREASE_SHORT, SignalType.OPEN_SHORT]:
+            # 卖出操作（平仓/加空仓/开空仓）价格向下滑
             execution_price = current_price * (1 - self.config.slippage)
-        elif signal.signal_type in [SignalType.OPEN_SHORT]:
-            execution_price = current_price * (1 - self.config.slippage)  # 做空仓时价格向下
         else:
             execution_price = current_price
             
@@ -437,22 +502,26 @@ class Backtester:
             
             self.logger.info(f"买入 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 价值 {cost:.2f}, 手续费 {position_fee:.2f}")
             
-        elif signal.signal_type in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
-            # 平仓（平多仓或平空仓）
-            quantity = min(signal.amount if signal.amount is not None else signal.quantity, position.quantity)
-            
-            if quantity <= 0:
-                self.logger.warning(f"持仓不足，无法卖出 {symbol}, 持仓 {position.quantity}")
+        elif signal.signal_type == SignalType.CLOSE_LONG:
+            # 平多仓 - 全部卖出
+            if position.quantity <= 0:
+                self.logger.warning(f"没有多头持仓可平仓 {symbol}, 持仓 {position.quantity}")
                 return
-                
+
+            quantity = min(signal.amount if signal.amount is not None else signal.quantity, position.quantity)
+
+            if quantity <= 0:
+                self.logger.warning(f"持仓不足，无法卖出平多仓 {symbol}, 持仓 {position.quantity}")
+                return
+
             revenue = execution_price * quantity
             fee = revenue * self.config.fee_rate
             net_revenue = revenue - fee
-            
+
             # 执行交易
             position_fee = position.execute_trade("sell", execution_price, quantity, self.config.fee_rate)
             self.balance += net_revenue
-            
+
             # 记录交易
             trade = TradeRecord(
                 timestamp=self.current_time,
@@ -464,41 +533,245 @@ class Backtester:
                 fee=position_fee,
                 pnl=position.realized_pnl,
                 balance=self.balance,
+                type="market",
                 strategy_id=self.strategy.name if hasattr(self.strategy, 'name') else "unknown"
             )
             self.trade_records.append(trade)
-            
-            self.logger.info(f"卖出 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 价值 {revenue:.2f}, 手续费 {position_fee:.2f}, 已实现盈亏 {position.realized_pnl:.2f}")
-            
-        elif signal.signal_type in [SignalType.CLOSE, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
-            # 平仓
-            if position.quantity > 0:
-                # 全部卖出
-                revenue = execution_price * position.quantity
-                fee = revenue * self.config.fee_rate
-                net_revenue = revenue - fee
-                
-                # 执行交易
-                position_fee = position.execute_trade("sell", execution_price, position.quantity, self.config.fee_rate)
-                self.balance += net_revenue
-                
-                # 记录交易
-                trade = TradeRecord(
-                    timestamp=self.current_time,
-                    symbol=symbol,
-                    side="sell",
-                    price=execution_price,
-                    quantity=position.quantity,
-                    value=revenue,
-                    fee=position_fee,
-                    pnl=position.realized_pnl,
-                    balance=self.balance,
-                    strategy_id=self.strategy.name if hasattr(self.strategy, 'name') else "unknown"
-                )
-                self.trade_records.append(trade)
-                
-                self.logger.info(f"平仓 {symbol}: 价格 {execution_price:.4f}, 数量 {position.quantity}, 价值 {revenue:.2f}, 手续费 {position_fee:.2f}, 已实现盈亏 {position.realized_pnl:.2f}")
-                
+
+            self.logger.info(f"平多仓 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 价值 {revenue:.2f}, 手续费 {position_fee:.2f}, 已实现盈亏 {position.realized_pnl:.2f}")
+
+        elif signal.signal_type == SignalType.CLOSE_SHORT:
+            # 平空仓 - 买回
+            if position.quantity >= 0:
+                self.logger.warning(f"没有空头持仓可平仓 {symbol}, 持仓 {position.quantity}")
+                return
+
+            quantity_to_buy = min(signal.amount if signal.amount is not None else signal.quantity, abs(position.quantity))
+
+            if quantity_to_buy <= 0:
+                self.logger.warning(f"持仓不足，无法买入平空仓 {symbol}, 持仓 {position.quantity}")
+                return
+
+            cost = execution_price * quantity_to_buy
+            fee = cost * self.config.fee_rate
+            total_cost = cost + fee
+
+            # 检查资金是否足够（只需要支付手续费，保证金会释放）
+            if fee > self.balance + position.margin_used:  # 可以使用保证金来支付手续费
+                self.logger.warning(f"资金不足，无法平空仓 {symbol}，需要手续费: {fee:.2f}，可用: {self.balance:.2f}")
+                return
+
+            # 先保存当前持仓信息
+            quantity_before = abs(position.quantity)
+            margin_before = position.margin_used
+            realized_pnl_before = position.realized_pnl
+
+            # 执行交易
+            position_fee = position.execute_trade("buy", execution_price, quantity_to_buy, self.config.fee_rate)
+
+            # 释放与平仓数量对应的保证金
+            margin_to_release = margin_before * (quantity_to_buy / quantity_before)
+
+            # 计算本次交易产生的已实现盈亏
+            realized_pnl_change = position.realized_pnl - realized_pnl_before
+
+            # 详细日志
+            self.logger.info(f"平空仓详细计算 {symbol}:")
+            self.logger.info(f"  平仓前持仓: {quantity_before:.6f}, 总保证金: ${margin_before:.2f}")
+            self.logger.info(f"  平仓数量: {quantity_to_buy:.6f}, 比例: {quantity_to_buy/quantity_before:.2%}")
+            self.logger.info(f"  应释放保证金: ${margin_to_release:.2f}")
+            self.logger.info(f"  买回成本: ${cost:.2f}, 手续费: ${fee:.2f}")
+            self.logger.info(f"  已实现盈亏变化: ${realized_pnl_change:.2f}")
+            self.logger.info(f"   当前余额: ${self.balance:.2f}")
+            self.logger.info(f"  预期余额变化: +${margin_to_release:.2f} (保证金释放) + ${realized_pnl_change:.2f} (已实现盈亏) - ${fee:.2f} (手续费) = ${margin_to_release + realized_pnl_change - fee:.2f}")
+
+            # 释放保证金并扣除手续费，同时加上已实现盈亏
+            # 正确逻辑：释放保证金 + 已实现盈亏 - 手续费
+            self.balance = self.balance + margin_to_release + realized_pnl_change - fee
+
+            # 按比例减少保证金
+            position.margin_used = margin_before - margin_to_release
+
+            self.logger.info(f"  实际余额: ${self.balance:.2f}")
+            self.logger.info(f"  剩余保证金: ${position.margin_used:.2f}")
+
+            # 记录交易
+            trade = TradeRecord(
+                timestamp=self.current_time,
+                symbol=symbol,
+                side="buy",  # 平空仓是买入操作
+                price=execution_price,
+                quantity=quantity_to_buy,
+                value=cost,
+                fee=position_fee,
+                pnl=position.realized_pnl,
+                balance=self.balance,
+                type="market",
+                strategy_id=self.strategy.name if hasattr(self.strategy, 'name') else "unknown"
+            )
+            self.trade_records.append(trade)
+
+            self.logger.info(f"平空仓 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity_to_buy}, 成本 {cost:.2f}, 手续费 {position_fee:.2f}, 已实现盈亏 {position.realized_pnl:.2f}")
+
+        elif signal.signal_type in [SignalType.OPEN_SHORT]:
+            # 开空仓
+            quantity = signal.amount if signal.amount is not None else signal.quantity
+
+            # 开空仓需要冻结保证金作为风险抵押
+            margin_required = execution_price * quantity  # 保证金 = 仓位价值
+            fee = margin_required * self.config.fee_rate
+            total_funds_needed = margin_required + fee
+
+            if total_funds_needed > self.balance:
+                self.logger.warning(f"资金不足，无法开空仓 {symbol}，需要保证金+手续费: {total_funds_needed:.2f}，可用: {self.balance:.2f}")
+                return
+
+            # 执行交易 - 开空仓不直接增加现金，而是记录负债
+            position_fee = position.execute_trade("sell", execution_price, quantity, self.config.fee_rate)  # 开空仓记录为卖出
+
+            # 设置保证金金额（用于风险控制和平仓时的释放）
+            # 如果持仓没有保证金，则初始化；如果已有，则累加
+            if position.margin_used == 0:
+                position.margin_used = margin_required
+            else:
+                position.margin_used += margin_required
+
+            # 从现金中扣除保证金和手续费（保证金被冻结）
+            self.balance -= total_funds_needed
+
+            # 记录交易
+            trade = TradeRecord(
+                timestamp=self.current_time,
+                symbol=symbol,
+                side="sell",  # 开空仓在交易记录中记为sell
+                price=execution_price,
+                quantity=quantity,
+                value=execution_price * quantity,  # 交易价值 = 实际交易金额
+                fee=position_fee,
+                balance=self.balance,
+                strategy_id=self.strategy.name if hasattr(self.strategy, 'name') else "unknown"
+            )
+            self.trade_records.append(trade)
+
+            self.logger.info(f"开空仓 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 保证金 {margin_required:.2f}, 手续费 {position_fee:.2f}, 可用余额 {self.balance:.2f}")
+
+  
+        elif signal.signal_type in [SignalType.INCREASE_LONG]:
+            # 加多仓
+            quantity = signal.amount if signal.amount is not None else signal.quantity
+            cost = execution_price * quantity
+            fee = cost * self.config.fee_rate
+            total_cost = cost + fee
+
+            if total_cost > self.balance:
+                self.logger.warning(f"资金不足，无法加多仓 {symbol}, 需要 {total_cost:.2f}, 余额 {self.balance:.2f}")
+                return
+
+            # 执行交易
+            position_fee = position.execute_trade("buy", execution_price, quantity, self.config.fee_rate)
+            self.balance -= total_cost
+
+            # 记录交易
+            trade = TradeRecord(
+                timestamp=self.current_time,
+                symbol=symbol,
+                side="buy",
+                price=execution_price,
+                quantity=quantity,
+                value=cost,
+                fee=position_fee,
+                pnl=position.realized_pnl,
+                balance=self.balance,
+                strategy_id=self.strategy.name if hasattr(self.strategy, 'name') else "unknown"
+            )
+            self.trade_records.append(trade)
+
+            self.logger.info(f"加多仓 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 价值 {cost:.2f}, 手续费 {position_fee:.2f}")
+
+        elif signal.signal_type in [SignalType.INCREASE_SHORT]:
+            # 加空仓
+            quantity = signal.amount if signal.amount is not None else signal.quantity
+
+            # 加空仓需要冻结额外保证金作为风险抵押
+            margin_required = execution_price * quantity  # 保证金 = 仓位价值
+            fee = margin_required * self.config.fee_rate
+            total_funds_needed = margin_required + fee
+
+            if total_funds_needed > self.balance:
+                self.logger.warning(f"资金不足，无法加空仓 {symbol}，需要保证金+手续费: {total_funds_needed:.2f}，可用: {self.balance:.2f}")
+                return
+
+            # 执行交易 - 加空仓不直接增加现金，而是记录负债
+            position_fee = position.execute_trade("sell", execution_price, quantity, self.config.fee_rate)  # 加空仓记录为卖出
+
+            # 更新保证金金额（用于风险控制和平仓时的释放）
+            # 当前保证金 + 新增保证金
+            position.margin_used += margin_required
+
+            # 从现金中扣除保证金和手续费（新保证金被冻结）
+            self.balance -= total_funds_needed
+
+            # 记录交易
+            trade = TradeRecord(
+                timestamp=self.current_time,
+                symbol=symbol,
+                side="sell",  # 加空仓在交易记录中记为sell
+                price=execution_price,
+                quantity=quantity,
+                value=execution_price * quantity,  # 交易价值 = 实际交易金额
+                fee=position_fee,
+                balance=self.balance,
+                strategy_id=self.strategy.name if hasattr(self.strategy, 'name') else "unknown"
+            )
+            self.trade_records.append(trade)
+
+            self.logger.info(f"加空仓 {symbol}: 价格 {execution_price:.4f}, 数量 {quantity}, 增加保证金 {margin_required:.2f}, 手续费 {position_fee:.2f}, 可用余额 {self.balance:.2f}")
+
+        # === 关键修复：同步持仓状态到策略 ===
+        self._sync_position_to_strategy(symbol, position)
+
+    def _sync_position_to_strategy(self, symbol: str, position):
+        """
+        同步Backtester的持仓状态到Strategy
+        这确保了Strategy.has_position()和Strategy.get_position()能获取正确的持仓信息
+        """
+        # 如果持仓为0，移除策略中的持仓记录
+        if abs(position.quantity) < 1e-10:  # 使用小的epsilon值避免浮点误差
+            if hasattr(self.strategy, 'remove_position'):
+                self.strategy.remove_position(symbol)
+            elif hasattr(self.strategy, 'positions') and symbol in self.strategy.positions:
+                del self.strategy.positions[symbol]
+
+        # 如果有持仓，同步到策略
+        elif position.quantity > 0:
+            # 多头持仓
+            if hasattr(self.strategy, 'add_position'):
+                self.strategy.add_position(symbol, 'long', position.quantity, position.avg_price)
+            elif hasattr(self.strategy, 'positions'):
+                self.strategy.positions[symbol] = type('Position', (), {
+                    'side': 'long',
+                    'amount': position.quantity,
+                    'entry_price': position.avg_price,
+                    'current_price': position.avg_price
+                })()
+
+        elif position.quantity < 0:
+            # 空头持仓
+            if hasattr(self.strategy, 'add_position'):
+                self.strategy.add_position(symbol, 'short', abs(position.quantity), position.avg_price)
+            elif hasattr(self.strategy, 'positions'):
+                self.strategy.positions[symbol] = type('Position', (), {
+                    'side': 'short',
+                    'amount': abs(position.quantity),
+                    'entry_price': position.avg_price,
+                    'current_price': position.avg_price
+                })()
+
+        # 同步已实现盈亏
+        if hasattr(self.strategy, 'positions') and symbol in self.strategy.positions:
+            if hasattr(self.strategy.positions[symbol], 'realized_pnl'):
+                self.strategy.positions[symbol].realized_pnl = position.realized_pnl
+
     def _generate_results(self, final_equity: float) -> Dict[str, Any]:
         """生成回测结果"""
         # 创建权益曲线DataFrame

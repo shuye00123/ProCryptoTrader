@@ -14,13 +14,12 @@ from typing import Dict, List, Optional, Union, Any, Tuple, Set
 from dataclasses import dataclass, field
 import logging
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 
 from .logger import Logger
 
-# 导入core.trading.position_manager中的PositionManager
-from ..trading.position_manager import PositionManager as TradingPositionManager
 
 logger = Logger.get_logger("RiskManager")
 
@@ -455,38 +454,266 @@ class RiskCalculator:
         else:
             return RiskLevel.LOW
 
+    # 以下是从risk_tools.py迁移的独特方法
+    @staticmethod
+    def calculate_var(returns: pd.Series, confidence_level: float = 0.05) -> float:
+        """
+        计算VaR（风险价值）
+
+        Args:
+            returns: 收益率序列
+            confidence_level: 置信水平
+
+        Returns:
+            float: VaR值
+        """
+        if len(returns) == 0:
+            return 0.0
+
+        return np.percentile(returns, confidence_level * 100)
+
+    @staticmethod
+    def calculate_max_drawdown(equity_curve: pd.Series) -> float:
+        """
+        计算最大回撤
+
+        Args:
+            equity_curve: 权益曲线
+
+        Returns:
+            float: 最大回撤
+        """
+        if len(equity_curve) == 0:
+            return 0.0
+
+        cumulative = (1 + equity_curve).cumprod()
+        running_max = cumulative.expanding().max()
+        drawdown = (cumulative - running_max) / running_max
+
+        return drawdown.min()
+
+    @staticmethod
+    def calculate_sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
+        """
+        计算夏普比率
+
+        Args:
+            returns: 收益率序列
+            risk_free_rate: 无风险利率
+
+        Returns:
+            float: 夏普比率
+        """
+        if len(returns) == 0:
+            return 0.0
+
+        excess_returns = returns - risk_free_rate
+
+        if excess_returns.std() == 0:
+            return 0.0
+
+        return excess_returns.mean() / excess_returns.std() * np.sqrt(252)  # 年化
+
+    @staticmethod
+    def calculate_sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
+        """
+        计算索提诺比率
+
+        Args:
+            returns: 收益率序列
+            risk_free_rate: 无风险利率
+
+        Returns:
+            float: 索提诺比率
+        """
+        if len(returns) == 0:
+            return 0.0
+
+        excess_returns = returns - risk_free_rate
+        downside_returns = excess_returns[excess_returns < 0]
+
+        if len(downside_returns) == 0 or downside_returns.std() == 0:
+            return 0.0
+
+        return excess_returns.mean() / downside_returns.std() * np.sqrt(252)  # 年化
+
+    @staticmethod
+    def calculate_calmar_ratio(returns: pd.Series) -> float:
+        """
+        计算卡玛比率
+
+        Args:
+            returns: 收益率序列
+
+        Returns:
+            float: 卡玛比率
+        """
+        if len(returns) == 0:
+            return 0.0
+
+        total_return = (1 + returns).prod() - 1
+        max_drawdown = RiskCalculator.calculate_max_drawdown(returns)
+
+        if max_drawdown == 0:
+            return 0.0
+
+        return total_return / abs(max_drawdown)
+
+    @staticmethod
+    def calculate_win_rate(trades: List[Dict]) -> float:
+        """
+        计算胜率
+
+        Args:
+            trades: 交易记录列表
+
+        Returns:
+            float: 胜率
+        """
+        if not trades:
+            return 0.0
+
+        winning_trades = sum(1 for trade in trades if trade.get('pnl', 0) > 0)
+
+        return winning_trades / len(trades)
+
+    @staticmethod
+    def calculate_profit_factor(trades: List[Dict]) -> float:
+        """
+        计算盈利因子
+
+        Args:
+            trades: 交易记录列表
+
+        Returns:
+            float: 盈利因子
+        """
+        if not trades:
+            return 0.0
+
+        gross_profit = sum(trade.get('pnl', 0) for trade in trades if trade.get('pnl', 0) > 0)
+        gross_loss = sum(abs(trade.get('pnl', 0)) for trade in trades if trade.get('pnl', 0) < 0)
+
+        if gross_loss == 0:
+            return float('inf') if gross_profit > 0 else 0.0
+
+        return gross_profit / gross_loss
+
+    @staticmethod
+    def calculate_kelly_ratio(trades: List[Dict]) -> float:
+        """
+        计算凯利比率
+
+        Args:
+            trades: 交易记录列表
+
+        Returns:
+            float: 凯利比率
+        """
+        if not trades:
+            return 0.0
+
+        win_rate = RiskCalculator.calculate_win_rate(trades)
+
+        if win_rate == 0:
+            return 0.0
+
+        winning_trades = [trade for trade in trades if trade.get('pnl', 0) > 0]
+        losing_trades = [trade for trade in trades if trade.get('pnl', 0) < 0]
+
+        if not winning_trades or not losing_trades:
+            return 0.0
+
+        avg_win = sum(trade.get('pnl', 0) for trade in winning_trades) / len(winning_trades)
+        avg_loss = sum(abs(trade.get('pnl', 0)) for trade in losing_trades) / len(losing_trades)
+
+        if avg_loss == 0:
+            return 0.0
+
+        return win_rate - (1 - win_rate) * (avg_win / avg_loss)
+
+    @staticmethod
+    def calculate_position_size_kelly(capital: float, win_rate: float,
+                                    avg_win: float, avg_loss: float,
+                                    leverage: float = 1.0) -> float:
+        """
+        使用凯利公式计算最优仓位大小
+
+        Args:
+            capital: 总资金
+            win_rate: 胜率
+            avg_win: 平均盈利
+            avg_loss: 平均亏损
+            leverage: 杠杆倍数
+
+        Returns:
+            float: 最优仓位大小
+        """
+        if avg_loss == 0:
+            return 0.0
+
+        # 凯利公式: f = (p * b - q) / b
+        # 其中 p 是胜率, q 是败率, b 是盈亏比
+        win_prob = win_rate
+        lose_prob = 1 - win_rate
+        win_loss_ratio = avg_win / avg_loss
+
+        kelly_fraction = (win_prob * win_loss_ratio - lose_prob) / win_loss_ratio
+
+        # 限制凯利比例在合理范围内
+        kelly_fraction = max(0, min(kelly_fraction, 0.25))  # 限制在0-25%之间
+
+        return capital * kelly_fraction * leverage
+
 
 class RiskManager:
     """
     风险管理器（主类）
     整合了仓位管理、止损止盈管理和风险计算功能
+    使用依赖注入解决循环依赖问题
     """
-    
-    def __init__(self, risk_config: Optional[RiskConfig] = None):
+
+    def __init__(self,
+                 risk_config: Optional[RiskConfig] = None,
+                 position_service: Optional[Any] = None):
         """
         初始化风险管理器
-        
+
         Args:
             risk_config: 风险控制配置
+            position_service: 持仓服务接口（依赖注入）
         """
         self.risk_config = risk_config or RiskConfig()
         self.logger = Logger.get_logger("RiskManager")
-        
-        # 初始化组件
-        self.position_manager = TradingPositionManager()
+
+        # 依赖注入或使用默认实现
+        self.position_service = position_service or self._create_default_position_service()
+
+        # 初始化组件（不直接依赖trading模块）
         self.stop_loss_manager = StopLossManager()
         self.risk_calculator = RiskCalculator()
-        
+
         # 追踪变量
         self.trade_history: List[OrderInfo] = []
         self.daily_trades: Dict[str, int] = {}  # 每日交易次数
         self.total_pnl: float = 0.0  # 总盈亏
         self.highest_equity: float = 0.0  # 最高权益
         self.current_equity: float = 0.0  # 当前权益
-        
+
         # 初始化权益
         self.current_equity = self.risk_config.max_position_value
         self.highest_equity = self.current_equity
+
+    def _create_default_position_service(self) -> Any:
+        """
+        创建默认的持仓服务实现
+
+        Returns:
+            Any: 持仓服务实现
+        """
+        # 延迟导入，避免循环依赖
+        from ..trading.position_manager import PositionManager as TradingPositionManager
+        return TradingPositionManager()
     
     def check_trade_risk(
         self, 
@@ -842,3 +1069,100 @@ class RiskManager:
         if today in self.daily_trades:
             self.daily_trades[today] = 0
             self.logger.info("Reset daily trade counter")
+
+    # 风险管理核心方法
+    def validate_position_size(self, symbol: str, size: float, price: float) -> bool:
+        """
+        验证仓位大小
+
+        Args:
+            symbol: 交易对
+            size: 仓位大小
+            price: 价格
+
+        Returns:
+            bool: 是否通过验证
+        """
+        try:
+            # 检查最小仓位大小
+            if size < self.risk_config.min_position_size:
+                self.logger.warning(f"Position size {size} below minimum {self.risk_config.min_position_size}")
+                return False
+
+            # 检查单个交易最大仓位价值
+            position_value = size * price
+            if position_value > self.risk_config.max_position_size_per_trade:
+                self.logger.warning(f"Position value {position_value} exceeds maximum {self.risk_config.max_position_size_per_trade}")
+                return False
+
+            # 检查最大持仓比例
+            total_value = self.risk_config.max_position_value
+            if total_value > 0 and (position_value / total_value) > self.risk_config.max_position_percent_per_trade:
+                self.logger.warning(f"Position percentage exceeds maximum")
+                return False
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error validating position size: {e}")
+            return False
+
+    def check_risk_limits(self) -> List[str]:
+        """
+        检查风险限制
+
+        Returns:
+            List[str]: 风险警告列表
+        """
+        warnings = []
+        try:
+            # 检查最大回撤
+            current_drawdown = self.get_current_drawdown()
+            if current_drawdown > self.risk_config.max_drawdown_percent:
+                warnings.append(f"Drawdown {current_drawdown:.2f}% exceeds limit {self.risk_config.max_drawdown_percent}%")
+
+            # 检查每日交易次数
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_trades = self.daily_trades.get(today, 0)
+            if today_trades > self.risk_config.max_trades_per_day:
+                warnings.append(f"Daily trades {today_trades} exceeds limit {self.risk_config.max_trades_per_day}")
+
+            # 检查总损失
+            if self.total_pnl < -self.risk_config.max_loss_percent / 100 * self.risk_config.max_position_value:
+                warnings.append(f"Total loss {self.total_pnl} exceeds limit")
+
+            return warnings
+
+        except Exception as e:
+            self.logger.error(f"Error checking risk limits: {e}")
+            return [f"Error checking risk limits: {e}"]
+
+    def update_risk_state(self, positions: List, trades: List) -> None:
+        """
+        更新风险状态
+
+        Args:
+            positions: 持仓列表
+            trades: 交易记录列表
+        """
+        try:
+            # 更新持仓信息
+            if self.position_service:
+                # 如果position_service可用，使用其数据
+                current_positions = self.position_service.get_positions()
+            else:
+                current_positions = positions
+
+            # 更新交易记录
+            for trade in trades:
+                if hasattr(trade, 'to_dict'):
+                    trade_data = trade.to_dict()
+                else:
+                    trade_data = trade
+
+                self.add_trade_record(trade_data)
+
+            self.logger.info(f"Updated risk state with {len(current_positions)} positions and {len(trades)} trades")
+
+        except Exception as e:
+            self.logger.error(f"Error updating risk state: {e}")

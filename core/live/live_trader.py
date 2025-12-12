@@ -24,7 +24,7 @@ from ..data.data_manager import DataManager
 from ..exchange.base_exchange import BaseExchange
 from ..strategy.base_strategy import BaseStrategy
 from ..utils.logger import Logger
-from ..utils.risk_control import RiskManager
+from ..utils.risk_manager import RiskManager
 from .config_loader import LiveConfig, ConfigLoader
 
 

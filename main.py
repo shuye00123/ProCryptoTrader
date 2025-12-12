@@ -114,6 +114,7 @@ class ProCryptoTrader:
             from core.strategy.grid_strategy import GridStrategy
             from core.strategy.martingale_strategy import MartingaleStrategy
             from core.strategy.enhanced_grid_strategy import EnhancedGridStrategy
+            from core.strategy.traditional_grid_strategy import TraditionalGridStrategy
 
             # 获取回测配置
             basic_config = config.get('basic', {})
@@ -131,7 +132,7 @@ class ProCryptoTrader:
                 slippage=trading_config.get('slippage', 0.0005),
                 symbols=data_config.get('symbols', ['BTC/USDT']),
                 timeframes=data_config.get('timeframes', ['1h']),
-                data_dir=data_config.get('data_dir', './data') + '/' + data_config.get('exchange', 'binance'),
+                data_dir=os.path.join(data_config.get('data_dir', './data'), data_config.get('exchange', 'binance')),
                 output_dir=output_config.get('output_dir', './results')
             )
 
@@ -150,10 +151,12 @@ class ProCryptoTrader:
 
             if strategy_name == 'GridStrategy':
                 strategy_instance = GridStrategy(strategy_params)
-            elif strategy_name == 'EnhancedGridStrategy':
-                strategy_instance = EnhancedGridStrategy(strategy_params)
             elif strategy_name == 'Martingale':
                 strategy_instance = MartingaleStrategy(strategy_params)
+            elif strategy_name == 'EnhancedGridStrategy' or strategy_name == 'EnhancedGrid':
+                strategy_instance = EnhancedGridStrategy(strategy_params)
+            elif strategy_name == 'TraditionalGridStrategy' or strategy_name == 'TraditionalGrid':
+                strategy_instance = TraditionalGridStrategy(strategy_params)
             else:
                 logger.error(f"不支持的策略: {strategy_name}")
                 return False
@@ -244,6 +247,7 @@ class ProCryptoTrader:
             from core.strategy.grid_strategy import GridStrategy
             from core.strategy.martingale_strategy import MartingaleStrategy
             from core.strategy.enhanced_grid_strategy import EnhancedGridStrategy
+            from core.strategy.traditional_grid_strategy import TraditionalGridStrategy
 
             strategies = {
                 'GridStrategy': {
@@ -254,10 +258,17 @@ class ProCryptoTrader:
                 },
                 'EnhancedGridStrategy': {
                     'name': '增强网格策略',
-                    'description': '支持做多/做空方向配置的增强网格策略',
-                    'suitable': '震荡行情、趋势行情',
-                    'config_file': 'enhanced_grid_backtest_config.yaml',
-                    'features': ['方向配置', '网格重平衡', '趋势确认']
+                    'description': '支持波动率自适应、智能重平衡的高级网格策略',
+                    'suitable': '高波动性市场',
+                    'config_file': 'enhanced_grid_backtest.yaml',
+                    'features': ['波动率自适应', '智能重平衡', '绝对价格限制', '风险控制增强']
+                },
+                'TraditionalGridStrategy': {
+                    'name': '传统网格策略',
+                    'description': '基于固定价格边界的经典网格交易策略',
+                    'suitable': '震荡行情和趋势市场',
+                    'config_file': 'traditional_grid_backtest.yaml',
+                    'features': ['固定价格边界', '价格穿越检测', '网格状态切换', '简单高效']
                 },
                 'Martingale': {
                     'name': '马丁格尔策略',
@@ -273,6 +284,8 @@ class ProCryptoTrader:
                 logger.info(f"    描述: {info['description']}")
                 logger.info(f"    适合: {info['suitable']}")
                 logger.info(f"    配置文件: {info['config_file']}")
+                if 'features' in info:
+                    logger.info(f"    特性: {', '.join(info['features'])}")
                 logger.info("")
 
         except ImportError as e:

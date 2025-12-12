@@ -37,10 +37,10 @@ class ConfigLoader:
     def load_config(self, config_path: Union[str, Path]) -> Dict[str, Any]:
         """
         加载配置文件
-        
+
         Args:
             config_path: 配置文件路径
-            
+
         Returns:
             Dict[str, Any]: 配置数据字典
         """
@@ -105,32 +105,90 @@ class ConfigLoader:
         
         config[keys[-1]] = value
     
-    def save_config(self, config_path: Union[str, Path]) -> None:
+    def read_config(self, config_path: Union[str, Path]) -> Dict[str, Any]:
         """
-        保存配置到文件
-        
+        读取配置文件（向后兼容别名）
+
         Args:
             config_path: 配置文件路径
+
+        Returns:
+            Dict[str, Any]: 配置数据字典
         """
+        return self.load_config(config_path)
+
+    def save_config(self, config_data: Optional[Dict[str, Any]] = None, config_path: Optional[Union[str, Path]] = None) -> None:
+        """
+        保存配置到文件
+
+        Args:
+            config_data: 要保存的配置数据，如果为None则保存当前配置
+            config_path: 配置文件路径，如果为None则使用上次加载的路径
+        """
+        # 如果提供了config_data，使用它；否则使用当前配置
+        data_to_save = config_data if config_data is not None else self._config
+
+        if config_path is None:
+            raise ValueError("config_path must be provided when saving config")
+
         config_path = Path(config_path)
-        
+
         try:
             # 确保目录存在
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             with open(config_path, 'w', encoding='utf-8') as f:
                 if config_path.suffix.lower() in ['.yaml', '.yml']:
-                    yaml.dump(self._config, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(data_to_save, f, default_flow_style=False, allow_unicode=True)
                 elif config_path.suffix.lower() == '.json':
-                    json.dump(self._config, f, indent=2, ensure_ascii=False)
+                    json.dump(data_to_save, f, indent=2, ensure_ascii=False)
                 else:
                     raise ValueError(f"Unsupported config file format: {config_path.suffix}")
-            
+
             self.logger.info(f"Saved config to {config_path}")
-        
+
         except Exception as e:
             self.logger.error(f"Failed to save config to {config_path}: {e}")
             raise
+
+    def merge_configs(self, *configs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        合并多个配置字典
+
+        Args:
+            *configs: 要合并的配置字典
+
+        Returns:
+            Dict[str, Any]: 合并后的配置字典
+        """
+        result = {}
+        for config in configs:
+            if isinstance(config, dict):
+                result.update(config)
+        return result
+
+    def validate_config(self, config: Dict[str, Any], schema: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        验证配置
+
+        Args:
+            config: 要验证的配置字典
+            schema: 验证模式，如果为None则进行基本验证
+
+        Returns:
+            bool: 验证是否通过
+        """
+        try:
+            # 基本验证
+            if not isinstance(config, dict):
+                return False
+
+            # 如果提供了schema，可以进行更详细的验证
+            # 这里只做基本验证，可以根据需要扩展
+            return True
+
+        except Exception:
+            return False
     
     def get_exchange_config(self, exchange_name: str) -> Dict[str, Any]:
         """
@@ -225,3 +283,7 @@ def find_config_file(config_name: str, search_paths: Optional[list] = None) -> O
             return config_path
     
     return None
+
+
+# 为了向后兼容，提供ConfigParser别名
+ConfigParser = ConfigLoader
