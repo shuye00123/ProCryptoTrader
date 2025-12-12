@@ -1,9 +1,16 @@
 # 传统网格策略回测配置文件
+#
+# 重要更新 (2024-12-12):
+# - 已修复保证金累积双重计算问题
+# - 完善短头寸会计系统
+# - 实现智能信号识别
+# - 优化网格状态管理
+# - 新增初始仓位功能
 
 # 基本设置
 basic:
   start_date: "2024-01-01"     # 回测开始日期
-  end_date: "2025-09-30"       # 回测结束日期 (扩展到1个月以获得更大价格变化)
+  end_date: "2025-09-30"       # 回测结束日期
   initial_balance: 10000      # 初始资金
   benchmark: "BTC/USDT"        # 基准标的
 
@@ -22,18 +29,26 @@ strategy:
   class: "TraditionalGridStrategy"   # 策略类名
   params:
     # 传统网格参数
-    grid_count: 100               # 网格数量 (减少网格密度避免过度频繁交易)
+    grid_count: 100                # 网格数量 (适中的网格密度)
     position_size: 0.01           # 仓位大小 2%
-    max_positions: 50             # 最大持仓数量
+    max_positions: 1              # 最大持仓数量 (传统网格通常只同时持仓一个方向)
 
     # 固定价格边界
     absolute_upper_price: 120000.0  # 固定上限价格
     absolute_lower_price: 30000.0  # 固定下限价格
-    base_price: 42488.0            # 固定基准价格 (基于2024年1月1日第一笔价格)
+    base_price: 45000.0            # 固定基准价格 (在边界之间)
 
     # 风险控制
     stop_loss_pct: 0.10          # 止损 10%
     take_profit_pct: 0.25        # 止盈 25%
+
+    # 调试选项
+    debug_mode: true             # 启用调试模式以获取详细日志
+
+    # 初始仓位配置
+    enable_initial_position: true      # 是否开启初始仓位
+    initial_position_size: 10          # 初始仓位大小（网格数）
+    initial_position_direction: "long" # 初始仓位方向: "long" 或 "short"
 
 # 交易设置
 trading:

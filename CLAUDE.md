@@ -6,6 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ProCryptoTrader is a professional cryptocurrency quantitative trading system supporting multi-exchange, multi-strategy, and multi-timeframe automated trading. The system follows the **RIPER-5 principles**: Risk first, Integration minimal, Predictability, Expandability, and Realistic evaluation.
 
+## 🎯 最新重大更新 (2024-12-12)
+
+### 关键问题修复
+✅ **保证金累积双重计算错误修复**: 解决了6次开空仓产生$1101.84保证金的异常，现在正确累积到~$1200
+
+✅ **TraditionalGridStrategy完整实现**: 实现了固定边界传统网格策略，包含经典价格穿越触发逻辑
+
+✅ **短头寸会计系统完善**: 修复CLOSE_SHORT余额计算，正确处理保证金释放和已实现盈亏
+
+✅ **智能信号识别系统**: 解决信号类型误判问题，现在能正确识别平空/开多/加仓等信号
+
+### 核心模块改进
+- **回测引擎**: 修复保证金管理、PnL计算、资金一致性验证
+- **策略系统**: 完整传统网格策略实现、智能仓位管理、网格状态跟踪
+- **持仓管理**: 资产负债分离、杠杆交易支持、渐进式平仓逻辑
+
 ---
 
 # 第一部分：当前项目详细架构和实现

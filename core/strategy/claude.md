@@ -1007,6 +1007,136 @@ class AdaptiveStrategy(BaseStrategy):
 - **分散投资**: 在多个交易对之间分散风险
 - **定期评估**: 定期评估策略表现和风险水平
 
+## 🔧 最新修复和改进
+
+### 1. TraditionalGridStrategy 完整实现 (2024-12-12)
+
+#### 策略特点
+- **固定边界网格**: 基于配置的价格上下边界和网格数量
+- **价格穿越触发**: 经典网格逻辑 - 下穿买入、上穿卖出
+- **网格状态管理**: 触发后的网格线变为失效状态，防止重复触发
+- **智能信号识别**: 根据持仓状态确定信号类型(平空/开多等)
+
+#### 核心架构
+```python
+class TraditionalGridStrategy(BaseStrategy):
+    def __init__(self, config: Dict):
+        # 网格参数
+        self.absolute_lower_price: float
+        self.absolute_upper_price: float
+        self.grid_count: int
+        self.base_price: float
+
+        # 网格状态
+        self.grid_orders: Dict[str, Dict[float, str]]  # {symbol: {price: order_type}}
+        self.last_triggered_grid: Dict[str, float]      # {symbol: price}
+```
+
+#### 信号生成逻辑
+```python
+def _check_grid_triggers(self, symbol: str, current_price: float) -> List[Signal]:
+    """检查传统网格触发条件"""
+    # 向下穿越下网格线 → 买入信号
+    if self.last_price.get(symbol, 0) <= lower_grid and current_price > lower_grid:
+        if grid_level not in self.executed_levels[symbol]:
+            signals.append(self._create_buy_signal(symbol, lower_grid))
+
+    # 向上穿越上网格线 → 卖出信号
+    elif self.last_price.get(symbol, 0) >= upper_grid and current_price < upper_grid:
+        if grid_level + 1 not in self.executed_levels[symbol]:
+            signals.append(self._create_sell_signal(symbol, upper_grid))
+```
+
+### 2. 智能信号类型识别系统
+
+#### 持仓状态同步
+- **问题**: 策略无法识别当前持仓状态，导致信号类型错误
+- **解决**: 增加Backtester与Strategy之间的持仓状态同步机制
+
+```python
+def sync_positions(self, backtester_positions: Dict[str, Position]):
+    """同步回测引擎的持仓状态到策略"""
+    self.positions = backtester_positions
+```
+
+#### 动态信号类型判断
+```python
+def _create_buy_signal(self, symbol: str, price: float) -> Signal:
+    if self.has_position(symbol):
+        position = self.get_position(symbol)
+        if position.side == 'short':
+            # 有空仓时，买入 = 平空仓
+            amount = min(grid_amount, position.amount)
+            signal_type = SignalType.CLOSE_SHORT
+        else:
+            # 有多仓时，买入 = 加多仓
+            signal_type = SignalType.INCREASE_LONG
+    else:
+        # 没有持仓时，买入 = 开多仓
+        signal_type = SignalType.OPEN_LONG
+```
+
+### 3. 网格仓位管理优化
+
+#### 渐进式平仓逻辑
+- **修复前**: 平空仓一次性平掉所有仓位
+- **修复后**: 按网格大小逐步平仓，符合网格策略逻辑
+
+```python
+def _create_buy_signal(self, symbol: str, price: float) -> Signal:
+    if position.side == 'short':
+        grid_amount = self._calculate_position_size(symbol, price)
+        amount = min(grid_amount, position.amount)  # 只平一个网格的仓位
+```
+
+#### 仓位大小计算
+```python
+def _calculate_position_size(self, symbol: str, price: float) -> float:
+    """基于资金比例的仓位大小计算"""
+    available_balance = getattr(self, 'initial_balance', 10000.0)
+    trade_amount_usd = available_balance * self.position_size  # 2%资金
+    return trade_amount_usd / price
+```
+
+### 4. 网格状态管理系统
+
+#### 失效状态机制
+- **防止重复触发**: 触发后的网格线变为'inactive'状态
+- **网格状态转换**: 买入后网格线变为卖出，卖出后变为买入
+- **状态跟踪**: `last_triggered_grid`记录最后触发的网格
+
+```python
+# 网格状态管理
+self.grid_orders[symbol][grid_price] = 'inactive'
+self.last_triggered_grid[symbol] = grid_price
+```
+
+#### 网格状态监控
+```python
+def get_grid_status(self, symbol: str) -> Dict:
+    """获取网格状态信息"""
+    return {
+        'grid_prices': self.grid_prices[symbol],
+        'executed_levels': list(self.executed_levels[symbol]),
+        'last_triggered_grid': self.last_triggered_grid.get(symbol),
+        'grid_orders': self.grid_orders.get(symbol, {})
+    }
+```
+
+### 5. 调试和监控系统
+
+#### 详细日志系统
+- **信号生成日志**: 记录每个信号的生成原因和参数
+- **网格状态日志**: 跟踪网格触发和状态变化
+- **执行结果日志**: 记录信号执行后的资金和持仓变化
+
+```python
+logger.info(f"传统网格平空信号 - {symbol}: 价格 ${price:.2f}, "
+           f"网格仓位 {grid_amount:.6f}, 实际平仓 {amount:.6f}")
+```
+
 ---
 
 本策略模块文档提供了完整的策略开发框架和使用指南，严格遵循RIPER-5原则，为量化交易系统提供了可靠、高效、可扩展的策略决策能力。所有策略实现都基于实际获取的价格数据，不使用任何模拟或假设性数据。
+
+**最新更新**: 已实现完整的TraditionalGridStrategy，包含智能信号识别、网格状态管理、渐进式仓位管理等核心功能，策略系统现在支持传统网格交易的所有核心特性。

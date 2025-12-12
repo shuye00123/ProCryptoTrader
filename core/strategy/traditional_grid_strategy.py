@@ -43,6 +43,14 @@ class TraditionalGridStrategy(BaseStrategy):
         self.absolute_lower_price = config.get('absolute_lower_price')
         self.base_price = config.get('base_price')
 
+        # 初始仓位配置
+        self.enable_initial_position = config.get('enable_initial_position', False)
+        self.initial_position_size = config.get('initial_position_size', 1)  # 初始仓位大小（网格数）
+        self.initial_position_direction = config.get('initial_position_direction', 'long').lower()  # 'long' or 'short'
+
+        # 初始仓位状态
+        self.initial_position_opened = False  # 标记是否已开初始仓位
+
         # 验证必要参数
         if not self.absolute_upper_price or not self.absolute_lower_price:
             raise ValueError("必须配置 absolute_upper_price 和 absolute_lower_price")
@@ -52,6 +60,15 @@ class TraditionalGridStrategy(BaseStrategy):
             raise ValueError("absolute_upper_price 必须大于 absolute_lower_price")
         if not (self.absolute_lower_price < self.base_price < self.absolute_upper_price):
             raise ValueError("base_price 必须在 absolute_lower_price 和 absolute_upper_price 之间")
+
+        # 验证初始仓位参数
+        if self.enable_initial_position:
+            if self.initial_position_size <= 0:
+                raise ValueError("initial_position_size 必须大于0")
+            if self.initial_position_direction not in ['long', 'short']:
+                raise ValueError("initial_position_direction 必须是 'long' 或 'short'")
+            if self.initial_position_size > self.grid_count // 2:
+                logger.warning(f"initial_position_size ({self.initial_position_size}) 较大，建议不超过网格数的一半")
 
         # 网格状态管理
         self.grid_prices = {}          # {symbol: [grid_prices]}
@@ -70,6 +87,14 @@ class TraditionalGridStrategy(BaseStrategy):
         logger.info(f"  价格范围: ${self.absolute_lower_price:,.2f} - ${self.absolute_upper_price:,.2f}")
         logger.info(f"  基准价格: ${self.base_price:,.2f}")
         logger.info(f"  网格数量: {self.grid_count}")
+
+        # 初始仓位配置信息
+        if self.enable_initial_position:
+            logger.info(f"  初始仓位: 启用")
+            logger.info(f"    方向: {self.initial_position_direction}")
+            logger.info(f"    大小: {self.initial_position_size} 格")
+        else:
+            logger.info(f"  初始仓位: 禁用")
 
     def calculate_indicators(self, data: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
         """
@@ -152,6 +177,14 @@ class TraditionalGridStrategy(BaseStrategy):
             if symbol not in self.grid_prices:
                 self._initialize_grid(symbol)
                 logger.info(f"网格策略 {symbol}: 网格初始化完成，网格数量: {len(self.grid_prices.get(symbol, []))}")
+
+            # 检查是否需要开初始仓位
+            if self.enable_initial_position and not self.initial_position_opened:
+                initial_signal = self._create_initial_position_signal(symbol, latest_price)
+                if initial_signal:
+                    signals.append(initial_signal)
+                    # 标记初始仓位已开启（在信号生成后立即标记，避免重复生成）
+                    self.initial_position_opened = True
 
             # 检查网格触发信号
             grid_signals = self._check_grid_triggers(symbol, latest_price)
@@ -544,7 +577,8 @@ class TraditionalGridStrategy(BaseStrategy):
             'grid_orders': self.grid_orders.get(symbol, {}),
             'last_triggered_grid': self.last_triggered_grid.get(symbol, None),
             'last_price': self.last_price.get(symbol, 0),
-            'trade_count': len(self.trade_history.get(symbol, []))
+            'trade_count': len(self.trade_history.get(symbol, [])),
+            'initial_position': self.get_initial_position_status()
         }
 
     def get_trade_history(self, symbol: str) -> List[Dict]:
@@ -575,3 +609,74 @@ class TraditionalGridStrategy(BaseStrategy):
             self.last_triggered_grid[symbol] = None
 
         logger.info("传统网格策略状态已重置")
+
+        # 重置初始仓位状态
+        self.initial_position_opened = False
+
+    def _create_initial_position_signal(self, symbol: str, current_price: float) -> Optional[Signal]:
+        """
+        创建初始仓位信号
+
+        Args:
+            symbol: 交易对
+            current_price: 当前价格
+
+        Returns:
+            初始仓位信号或None
+        """
+        if not self.enable_initial_position or self.initial_position_opened:
+            return None
+
+        # 如果已有持仓，不开启初始仓位
+        if self.has_position(symbol):
+            logger.info(f"{symbol}: 已有持仓，跳过初始仓位")
+            self.initial_position_opened = True  # 标记为已处理，避免重复检查
+            return None
+
+        try:
+            # 计算初始仓位的总数量
+            single_grid_size = self._calculate_position_size(symbol, current_price)
+            total_quantity = single_grid_size * self.initial_position_size
+
+            # 确定信号类型
+            if self.initial_position_direction == 'long':
+                signal_type = SignalType.OPEN_LONG
+                logger.info(f"{symbol}: 开启初始多仓位 {self.initial_position_size} 格 @ ${current_price:.2f}")
+            else:  # short
+                signal_type = SignalType.OPEN_SHORT
+                logger.info(f"{symbol}: 开启初始空仓位 {self.initial_position_size} 格 @ ${current_price:.2f}")
+
+            # 创建初始仓位信号
+            signal = Signal(
+                signal_type=signal_type,
+                symbol=symbol,
+                price=current_price,
+                quantity=total_quantity,
+                confidence=0.9,
+                metadata={
+                    'reason': 'initial_position',
+                    'grid_size': self.initial_position_size,
+                    'direction': self.initial_position_direction,
+                    'single_grid_size': single_grid_size
+                }
+            )
+
+            return signal
+
+        except Exception as e:
+            logger.error(f"{symbol}: 创建初始仓位信号时出错: {e}")
+            return None
+
+    def get_initial_position_status(self) -> Dict[str, Any]:
+        """
+        获取初始仓位状态信息
+
+        Returns:
+            初始仓位状态字典
+        """
+        return {
+            'enabled': self.enable_initial_position,
+            'opened': self.initial_position_opened,
+            'size': self.initial_position_size if self.enable_initial_position else 0,
+            'direction': self.initial_position_direction if self.enable_initial_position else None
+        }
