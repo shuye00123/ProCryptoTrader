@@ -1,81 +1,84 @@
-# ProCryptoTrader Requirements File
-# Professional cryptocurrency quantitative trading system
+# ProCryptoTrader - Professional Cryptocurrency Quantitative Trading System
+# Updated: 2025-12-18
+# Python Version: >=3.8 (Recommended: 3.10+)
 
 # ============================================================================
 # CORE DATA PROCESSING LIBRARIES
 # ============================================================================
-pandas>=2.0.0,<3.0.0          # Core data processing and time series analysis
-numpy>=1.24.0,<2.0.0           # Numerical computing and array operations
-pyarrow>=10.0.0                # High-performance data storage and Parquet support
+pandas>=2.3.0,<3.0.0             # Core data processing and time series analysis
+numpy>=2.3.0,<3.0.0              # Numerical computing and array operations
+pyarrow>=21.0.0                  # High-performance data storage and Parquet support
 
 # ============================================================================
 # WEBSOCKET AND REAL-TIME DATA LIBRARIES
 # ============================================================================
-websockets>=11.0.0               # WebSocket client implementation for real-time data
-aiohttp>=3.8.0                  # Async HTTP client for supplementary API calls
-asyncio-mqtt>=0.13.0            # Async MQTT client (for future extensions)
+websockets>=15.0.0              # WebSocket client for real-time market data
+aiohttp>=3.13.0                 # Async HTTP client for webhook notifications
 
 # ============================================================================
-# TRADING AND API LIBRARIES
+# TRADING AND EXCHANGE API LIBRARIES
 # ============================================================================
-ccxt>=4.0.0                     # Cryptocurrency exchange API interface
-requests>=2.28.0                # HTTP requests and API calls
+ccxt>=4.5.11                     # Cryptocurrency exchange unified API interface
+requests>=2.32.5                # HTTP requests and REST API calls
 
 # ============================================================================
 # DATA VISUALIZATION AND ANALYSIS
 # ============================================================================
-matplotlib>=3.6.0               # Basic charting and backtest visualization
-plotly>=5.15.0                  # Interactive charts and performance analysis
-seaborn>=0.12.0                 # Statistical charts and data visualization
-scipy>=1.10.0                   # Scientific computing and statistical analysis
+matplotlib>=3.10.0              # Basic charting and backtest visualization
+plotly>=6.3.0                   # Interactive charts and performance analysis
+seaborn>=0.13.0                 # Statistical visualization
+scipy>=1.16.0                   # Scientific computing and statistical analysis
 
 # ============================================================================
 # CONFIGURATION AND UTILITIES
 # ============================================================================
-PyYAML>=6.0                     # Configuration file parsing and parameter management
-python-dotenv>=1.0.0            # Environment variable management and configuration security
+PyYAML>=6.0.3                  # YAML configuration file parsing
+python-dotenv>=1.1.1            # Environment variable management
 
 # ============================================================================
-# DATA STORAGE AND PERFORMANCE
+# DATA STORAGE AND PERFORMANCE OPTIMIZATION
 # ============================================================================
-tables>=3.8.0                   # HDF5 support for scientific data storage (optional)
-psutil>=5.9.0                   # System monitoring and resource usage statistics
-orjson>=3.9.0                   # High-performance JSON processing
+tables>=3.10.0                 # HDF5 support for large dataset storage
+psutil>=7.1.0                   # System monitoring and resource usage statistics
+orjson>=3.9.0                   # High-performance JSON processing (if available)
 
 # ============================================================================
-# DEVELOPMENT AND TESTING
+# ASYNC PROCESSING AND PERFORMANCE
 # ============================================================================
-pytest>=7.0.0                   # Testing framework
-pytest-cov>=4.0.0               # Test coverage reporting
-pytest-asyncio>=0.21.0          # Async testing support
-black>=22.0.0                    # Code formatting
-flake8>=5.0.0                    # Code linting
-isort>=5.12.0                    # Import sorting
-mypy>=1.4.0                      # Static type checking
+# Note: asyncio is part of Python standard library (Python 3.7+)
+# Additional async support packages (optional)
+# aiofiles>=23.0.0               # Async file operations (if needed)
+
+# ============================================================================
+# DEVELOPMENT AND TESTING (Comment out for production)
+# ============================================================================
+# pytest>=7.0.0                   # Testing framework
+# pytest-cov>=4.0.0               # Test coverage reporting
+# pytest-asyncio>=0.21.0          # Async testing support
+# black>=22.0.0                    # Code formatting
+# flake8>=5.0.0                    # Code linting
+# isort>=5.12.0                    # Import sorting
+# mypy>=1.4.0                      # Static type checking
 
 # ============================================================================
 # OPTIONAL DEPENDENCIES (Uncomment as needed)
 # ============================================================================
 
 # Cache Management (for performance optimization)
-# redis>=4.5.0                    # Distributed caching
+# redis>=4.5.0                    # Distributed caching system
 # aioredis>=2.0.0                 # Async Redis client
 
 # Web Service Support (if API service needed)
-# fastapi>=0.100.0                # Web framework
-# uvicorn>=0.23.0                 # ASGI server
+# fastapi>=0.100.0                # Web framework for API services
+# uvicorn>=0.23.0                 # ASGI server for FastAPI
 # pydantic>=2.0.0                 # Data validation and serialization
 
-# Async Processing (for high-performance applications)
-# aiohttp>=3.8.0                  # Async HTTP client
-# aiofiles>=23.0.0                # Async file operations
-
-# Advanced Analytics (optional)
-# scikit-learn>=1.3.0             # Machine learning
+# Machine Learning Extensions (optional)
+# scikit-learn>=1.3.0             # Machine learning algorithms
 # joblib>=1.3.0                   # Parallel processing
 
 # Security and Encryption (optional)
-# cryptography>=41.0.0             # Data encryption
+# cryptography>=41.0.0             # Data encryption and security
 # keyring>=24.0.0                 # Secure key storage
 
 # Documentation (optional)
