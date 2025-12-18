@@ -634,7 +634,6 @@ class TickBreakoutDetector:
             detection_results.append("PATH:未触发")
 
         # [DEBUG] 输出所有检测结果
-        self.logger.debug(f"[DEBUG] 检测算法结果 - {symbol}: {', '.join(detection_results)}")
         self.logger.debug(f"[DEBUG] 总计触发算法: {len(detections)}/{5}, 需要最少确认: {self.min_confirmation_count}")
 
         # 检查是否满足最小确认数量
@@ -668,6 +667,7 @@ class TickBreakoutDetector:
             if avg_strength >= self.min_breakout_strength:
                 # 生成最终确认信号 - 每个交易对独立
                 combined_types = "+".join([d['type'] for d in self.pending_signals[symbol]])
+                self.logger.info(f"[DEBUG] 检测算法结果 - {symbol}: {', '.join(detection_results)}")
                 return self.create_breakout_signal(
                     tick,
                     f"MULTI_CONFIRMED_{self.min_confirmation_count}ALGOS",

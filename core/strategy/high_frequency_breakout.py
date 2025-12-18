@@ -355,7 +355,7 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
                     tick_signal, ticker_data.symbol
                 )
                 if breakout_signal:
-                    logger.info(f"Tick级别突破检测成功: {ticker_data.event_time} - {ticker_data.symbol} - {tick_signal.reason} - {tick_signal.confidence}")
+                    logger.info(f"Tick级别突破检测成功: {ticker_data} - {ticker_data.symbol} - {tick_signal.reason} - {tick_signal.confidence}")
                     return breakout_signal
 
             return None
