@@ -115,6 +115,7 @@ class ProCryptoTrader:
             from core.strategy.martingale_strategy import MartingaleStrategy
             from core.strategy.enhanced_grid_strategy import EnhancedGridStrategy
             from core.strategy.traditional_grid_strategy import TraditionalGridStrategy
+            from core.strategy.high_frequency_breakout import HighFrequencyBreakoutStrategy
 
             # 获取回测配置
             basic_config = config.get('basic', {})
@@ -157,6 +158,9 @@ class ProCryptoTrader:
                 strategy_instance = EnhancedGridStrategy(strategy_params)
             elif strategy_name == 'TraditionalGridStrategy' or strategy_name == 'TraditionalGrid':
                 strategy_instance = TraditionalGridStrategy(strategy_params)
+            elif strategy_name == 'HighFrequencyBreakout' or strategy_name == 'HighFrequency' or strategy_name == 'HFBreakout':
+                # 高频策略需要完整的配置而不是简单的参数
+                strategy_instance = HighFrequencyBreakoutStrategy(config)
             else:
                 logger.error(f"不支持的策略: {strategy_name}")
                 return False
@@ -204,6 +208,16 @@ class ProCryptoTrader:
             # 检查交易模式
             basic_config = config.get('basic', {})
             mode = basic_config.get('mode', 'paper')
+            strategy_config = config.get('strategy', {})
+            strategy_name = strategy_config.get('name', '')
+
+            # 检查是否为高频策略
+            is_hf_strategy = strategy_name in [
+                'HighFrequencyBreakout',
+                'HighFrequency',
+                'HFBreakout',
+                'HighFrequencyBreakoutStrategy'  # 添加完整策略名称
+            ]
 
             if mode == 'live':
                 logger.warning("⚠️  即将开始实盘交易!")
@@ -211,21 +225,41 @@ class ProCryptoTrader:
                 logger.warning("1. API密钥配置正确")
                 logger.warning("2. 风控参数设置合理")
                 logger.warning("3. 资金管理策略适当")
+                if is_hf_strategy:
+                    logger.warning("4. 高频策略风险较高，请确保已充分测试")
                 response = input("确认继续实盘交易? (yes/no): ")
                 if response.lower() != 'yes':
                     logger.info("用户取消实盘交易")
                     return False
             else:
                 logger.info("📊 开始模拟交易")
+                if is_hf_strategy:
+                    logger.info("🚀 启动高频突破策略模拟交易")
 
-            # 导入实盘交易模块
-            from core.live.live_trader import LiveTrader
+            # 根据策略类型选择不同的运行方式
+            if is_hf_strategy:
+                # 高频策略特殊处理
+                logger.info("启动高频突破策略...")
 
-            # 创建实盘交易实例
-            trader = LiveTrader(config_path)
+                # 导入高频策略交易器
+                from core.live.high_frequency_trader import HighFrequencyTrader
 
-            # 运行实盘交易
-            trader.run()
+                # 创建高频交易实例
+                trader = HighFrequencyTrader(config_path)
+
+                # 运行高频交易
+                trader.run()
+
+            else:
+                # 传统策略使用LiveTrader
+                # 导入实盘交易模块
+                from core.live.live_trader import LiveTrader
+
+                # 创建实盘交易实例
+                trader = LiveTrader(config_path)
+
+                # 运行实盘交易
+                trader.run()
 
             return True
 
@@ -248,6 +282,7 @@ class ProCryptoTrader:
             from core.strategy.martingale_strategy import MartingaleStrategy
             from core.strategy.enhanced_grid_strategy import EnhancedGridStrategy
             from core.strategy.traditional_grid_strategy import TraditionalGridStrategy
+            from core.strategy.high_frequency_breakout import HighFrequencyBreakoutStrategy
 
             strategies = {
                 'GridStrategy': {
@@ -275,6 +310,24 @@ class ProCryptoTrader:
                     'description': '亏损时加倍下注，直到盈利为止',
                     'suitable': '高胜率策略',
                     'config_file': 'backtest_config.yaml'
+                },
+                'HighFrequencyBreakout': {
+                    'name': '高频突破策略',
+                    'description': '基于WebSocket实时数据流的全市场高频突破交易策略',
+                    'suitable': '高流动性市场、全天候交易',
+                    'config_file': 'high_frequency_breakout_config.yaml',
+                    'features': [
+                        'WebSocket实时数据流',
+                        '全市场监控(1000+交易对)',
+                        '多维突破检测(价格/成交量/波动率)',
+                        '毫秒级信号生成',
+                        '低延迟订单执行',
+                        '智能风险控制',
+                        '自适应参数调整'
+                    ],
+                    'risk_level': '高风险',
+                    'requires_testnet': True,
+                    'min_balance': '1000 USDT'
                 }
             }
 
@@ -284,8 +337,19 @@ class ProCryptoTrader:
                 logger.info(f"    描述: {info['description']}")
                 logger.info(f"    适合: {info['suitable']}")
                 logger.info(f"    配置文件: {info['config_file']}")
+
                 if 'features' in info:
                     logger.info(f"    特性: {', '.join(info['features'])}")
+
+                if 'risk_level' in info:
+                    logger.info(f"    风险等级: {info['risk_level']}")
+
+                if 'requires_testnet' in info and info['requires_testnet']:
+                    logger.info(f"    警告: 建议先在测试网验证")
+
+                if 'min_balance' in info:
+                    logger.info(f"    最低资金要求: {info['min_balance']}")
+
                 logger.info("")
 
         except ImportError as e:
@@ -335,46 +399,46 @@ class ProCryptoTrader:
 
         try:
             config = load_config(config_path)
-            logger.info("✓ 配置文件格式正确")
+            logger.info("配置文件格式正确")
 
             # 验证基本配置
             if 'basic' in config:
                 basic = config['basic']
-                logger.info("✓ 基本配置存在")
+                logger.info("基本配置存在")
 
                 if 'start_date' in basic and 'end_date' in basic:
-                    logger.info(f"✓ 时间范围: {basic['start_date']} 至 {basic['end_date']}")
+                    logger.info(f"时间范围: {basic['start_date']} 至 {basic['end_date']}")
 
                 if 'initial_balance' in basic:
-                    logger.info(f"✓ 初始资金: {basic['initial_balance']}")
+                    logger.info(f"初始资金: {basic['initial_balance']}")
 
             # 验证数据配置
             if 'data' in config:
                 data = config['data']
-                logger.info("✓ 数据配置存在")
+                logger.info("数据配置存在")
 
                 if 'symbols' in data:
-                    logger.info(f"✓ 交易对: {data['symbols']}")
+                    logger.info(f"交易对: {data['symbols']}")
 
                 if 'timeframes' in data:
-                    logger.info(f"✓ 时间框架: {data['timeframes']}")
+                    logger.info(f"时间框架: {data['timeframes']}")
 
             # 验证策略配置
             if 'strategy' in config:
                 strategy = config['strategy']
-                logger.info("✓ 策略配置存在")
-                logger.info(f"✓ 策略名称: {strategy.get('name', 'Unknown')}")
+                logger.info("策略配置存在")
+                logger.info(f"策略名称: {strategy.get('name', 'Unknown')}")
 
             # 验证交易配置
             if 'trading' in config:
                 trading = config['trading']
-                logger.info("✓ 交易配置存在")
+                logger.info("交易配置存在")
 
                 if 'commission' in trading:
-                    logger.info(f"✓ 手续费率: {trading['commission']}")
+                    logger.info(f"手续费率: {trading['commission']}")
 
                 if 'position_size' in trading:
-                    logger.info(f"✓ 仓位大小: {trading['position_size']}")
+                    logger.info(f"仓位大小: {trading['position_size']}")
 
             logger.info("配置文件验证通过")
             return True
@@ -400,8 +464,14 @@ def create_parser():
   # 运行指定策略回测
   python main.py backtest --config backtest_config.yaml --strategy Martingale
 
+  # 运行高频突破策略回测
+  python main.py backtest --config high_frequency_breakout_config.yaml --strategy HighFrequencyBreakout
+
   # 运行实盘交易
   python main.py live --config live_config.yaml
+
+  # 运行高频突破策略实盘交易
+  python main.py live --config high_frequency_breakout_config.yaml
 
   # 列出所有策略
   python main.py list-strategies
@@ -462,7 +532,8 @@ def main():
     try:
         setup_logging(
             level=logging.INFO,
-            log_file=str(app.logs_dir / "main.log")
+            log_file=str(app.logs_dir / "main.log"),
+            log_format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
     except Exception as e:
         print(f"设置日志失败: {e}")

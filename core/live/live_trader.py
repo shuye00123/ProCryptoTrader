@@ -83,8 +83,28 @@ class LiveTrader:
         self._threads = []
         self._stop_event = threading.Event()
         
-        # 全局风控
-        self.global_risk_manager = RiskManager(**self.config.risk_control)
+        # 全局风控 - 创建RiskConfig对象
+        from core.utils.risk_manager import RiskConfig
+
+        # 从配置创建RiskConfig对象，只支持已定义的参数
+        risk_config_dict = self.config.risk_control
+        risk_config = RiskConfig(
+            max_position_value=risk_config_dict.get('max_position_value', 10000.0),
+            max_loss_percent=risk_config_dict.get('max_loss_percent', 2.0),
+            max_drawdown_percent=risk_config_dict.get('max_drawdown_percent', 10.0),
+            risk_reward_ratio=risk_config_dict.get('risk_reward_ratio', 1.5),
+            max_trades_per_day=risk_config_dict.get('max_trades_per_day', 10),
+            max_concurrent_trades=risk_config_dict.get('max_concurrent_trades', 5),
+            stop_loss_percent=risk_config_dict.get('default_stop_loss', 1.0) * 100 if risk_config_dict.get('default_stop_loss') else 1.0,
+            take_profit_percent=risk_config_dict.get('default_take_profit', 2.0) * 100 if risk_config_dict.get('default_take_profit') else 2.0,
+            max_position_size_per_trade=risk_config_dict.get('max_position_value', 10000.0),
+            max_leverage=1.0,
+            enable_position_limits=True,
+            enable_drawdown_control=True,
+            enable_frequency_control=True
+        )
+
+        self.global_risk_manager = RiskManager(risk_config=risk_config)
         
         # 全局统计
         self.global_stats = {

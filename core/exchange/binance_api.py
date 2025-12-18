@@ -1,4 +1,10 @@
 import ccxt
+import asyncio
+import websockets
+import json
+import time
+import hmac
+import hashlib
 from typing import Dict, List, Optional, Union, Tuple
 import pandas as pd
 from datetime import datetime
@@ -16,14 +22,14 @@ class BinanceAPI(BaseExchange):
     def __init__(self, api_key: str = None, api_secret: str = None, sandbox: bool = False):
         """
         初始化Binance API
-        
+
         Args:
             api_key: API密钥
             api_secret: API密钥
             sandbox: 是否使用沙盒环境
         """
         super().__init__(api_key, api_secret, sandbox)
-        
+
         # 初始化ccxt Binance实例
         self.exchange = ccxt.binance({
             'apiKey': api_key,
@@ -34,9 +40,16 @@ class BinanceAPI(BaseExchange):
                 'defaultType': 'future',  # 默认使用合约交易
             },
         })
-        
+
         # 加载市场信息
         self.markets = self.exchange.load_markets()
+
+        # WebSocket相关配置
+        self.ws_connection = None
+        self.ws_url = self._get_ws_url()
+        self.ws_listen_key = None
+        self.is_connected = False
+        self.pending_orders = {}  # 待确认的订单
     
     def create_market_order(self, symbol: str, side: str, amount: float, 
                            params: Optional[Dict] = None) -> Dict:
@@ -433,10 +446,10 @@ class BinanceAPI(BaseExchange):
     def _format_order(self, order: Dict) -> Dict:
         """
         格式化订单信息
-        
+
         Args:
             order: 原始订单信息
-            
+
         Returns:
             格式化后的订单信息
         """
@@ -454,4 +467,325 @@ class BinanceAPI(BaseExchange):
             'datetime': order.get('datetime', ''),
             'fee': order.get('fee', {}),
             'info': order.get('info', {})
+        }
+
+    def _get_ws_url(self) -> str:
+        """获取WebSocket URL"""
+        if self.sandbox:
+            return "wss://stream.binancefuture.com/ws"
+        else:
+            return "wss://fstream.binance.com/ws"
+
+    def _generate_signature(self, params: Dict) -> str:
+        """生成签名"""
+        if not self.api_secret:
+            return ""
+
+        # 创建查询字符串
+        query_string = '&'.join([f"{key}={value}" for key, value in sorted(params.items())])
+
+        # 生成HMAC签名
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        return signature
+
+    async def connect_websocket(self) -> bool:
+        """连接WebSocket"""
+        try:
+            # 1. 获取listen key
+            listen_key_result = self._create_listen_key()
+            if not listen_key_result or 'listenKey' not in listen_key_result:
+                logger.error("获取listen key失败")
+                return False
+
+            self.ws_listen_key = listen_key_result['listenKey']
+
+            # 2. 建立WebSocket连接
+            ws_url = f"{self.ws_url}/{self.ws_listen_key}"
+            self.ws_connection = await websockets.connect(
+                ws_url,
+                ping_interval=30,
+                ping_timeout=10
+            )
+
+            # 3. 启动消息处理
+            asyncio.create_task(self._handle_ws_messages())
+
+            self.is_connected = True
+            logger.info("WebSocket连接成功")
+            return True
+
+        except Exception as e:
+            logger.error(f"WebSocket连接失败: {e}")
+            return False
+
+    def _create_listen_key(self) -> Optional[Dict]:
+        """创建listen key"""
+        try:
+            if not self.api_key:
+                return None
+
+            url = f"{self.exchange.urls['api']}/v1/listenKey"
+            headers = {
+                'X-MBX-APIKEY': self.api_key,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+
+            # 发送请求
+            import requests
+            response = requests.post(url, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"创建listen key失败: {response.status_code} - {response.text}")
+                return None
+
+        except Exception as e:
+            logger.error(f"创建listen key异常: {e}")
+            return None
+
+    async def _handle_ws_messages(self):
+        """处理WebSocket消息"""
+        try:
+            async for message in self.ws_connection:
+                data = json.loads(message)
+                await self._process_ws_message(data)
+        except Exception as e:
+            logger.error(f"处理WebSocket消息异常: {e}")
+            self.is_connected = False
+
+    async def _process_ws_message(self, data: Dict):
+        """处理WebSocket消息"""
+        try:
+            if 'e' in data:
+                event_type = data['e']
+
+                if event_type == 'ORDER_TRADE_UPDATE':
+                    await self._handle_order_update(data)
+                elif event_type == 'ACCOUNT_UPDATE':
+                    await self._handle_account_update(data)
+                elif event_type == 'error':
+                    logger.error(f"WebSocket错误: {data}")
+
+        except Exception as e:
+            logger.error(f"处理WebSocket消息失败: {e}")
+
+    async def _handle_order_update(self, data: Dict):
+        """处理订单更新"""
+        try:
+            order_data = data.get('o', {})
+            order_id = order_data.get('i')
+            client_order_id = order_data.get('c')
+            symbol = order_data.get('s')
+            status = order_data.get('X')
+
+            # 查找待确认的订单
+            if client_order_id in self.pending_orders:
+                order_request = self.pending_orders[client_order_id]
+                order_request['exchange_order_id'] = order_id
+                order_request['status'] = self._convert_ws_status(status)
+                order_request['filled_amount'] = float(order_data.get('z', 0))
+                order_request['cumulative_quote'] = float(order_data.get('Z', 0))
+
+                logger.debug(f"订单更新: {client_order_id} - {status}")
+
+        except Exception as e:
+            logger.error(f"处理订单更新失败: {e}")
+
+    async def _handle_account_update(self, data: Dict):
+        """处理账户更新"""
+        # 处理账户余额更新等
+        pass
+
+    def _convert_ws_status(self, ws_status: str) -> str:
+        """转换WebSocket状态"""
+        status_mapping = {
+            'NEW': 'open',
+            'PARTIALLY_FILLED': 'partially_filled',
+            'FILLED': 'closed',
+            'CANCELED': 'canceled',
+            'REJECTED': 'rejected',
+            'EXPIRED': 'expired'
+        }
+        return status_mapping.get(ws_status, 'unknown')
+
+    async def place_order_websocket(self, order_params: Dict) -> Dict:
+        """通过WebSocket下单"""
+        try:
+            if not self.is_connected:
+                logger.warning("WebSocket未连接，使用REST API下单")
+                return await self._fallback_to_rest(order_params)
+
+            # 生成客户端订单ID
+            client_order_id = f"ws_{int(time.time() * 1000)}_{order_params.get('symbol', 'unknown')}"
+
+            # 构建下单参数
+            params = {
+                'symbol': order_params.get('symbol'),
+                'side': order_params.get('side'),
+                'type': order_params.get('type', 'MARKET'),
+                'quantity': order_params.get('quantity'),
+                'newClientOrderId': client_order_id
+            }
+
+            if order_params.get('type') == 'LIMIT':
+                params['price'] = order_params.get('price')
+                params['timeInForce'] = 'GTC'
+
+            # 添加到待确认订单
+            self.pending_orders[client_order_id] = {
+                'client_order_id': client_order_id,
+                'symbol': order_params.get('symbol'),
+                'side': order_params.get('side'),
+                'amount': order_params.get('quantity'),
+                'price': order_params.get('price', 0),
+                'status': 'submitted',
+                'exchange_order_id': None,
+                'filled_amount': 0,
+                'timestamp': time.time()
+            }
+
+            # 发送下单请求
+            order_request = {
+                'id': int(time.time() * 1000),
+                'method': 'order.place',
+                'params': params
+            }
+
+            await self.ws_connection.send(json.dumps(order_request))
+
+            # 等待订单确认（最多等待5秒）
+            return await self._wait_for_order_confirmation(client_order_id, timeout=5)
+
+        except Exception as e:
+            logger.error(f"WebSocket下单失败: {e}")
+            return await self._fallback_to_rest(order_params)
+
+    async def _wait_for_order_confirmation(self, client_order_id: str, timeout: int = 5) -> Dict:
+        """等待订单确认"""
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            if client_order_id in self.pending_orders:
+                order_request = self.pending_orders[client_order_id]
+
+                if order_request['exchange_order_id'] and order_request['status'] != 'submitted':
+                    return {
+                        'success': True,
+                        'orderId': order_request['exchange_order_id'],
+                        'clientOrderId': client_order_id,
+                        'status': order_request['status'],
+                        'symbol': order_request['symbol'],
+                        'side': order_request['side'],
+                        'type': 'MARKET' if order_request['price'] == 0 else 'LIMIT',
+                        'origQty': order_request['amount'],
+                        'executedQty': str(order_request['filled_amount']),
+                        'cummulativeQuoteQty': str(order_request.get('cumulative_quote', 0))
+                    }
+
+            await asyncio.sleep(0.1)  # 100ms
+
+        # 超时
+        self.pending_orders.pop(client_order_id, None)
+        return {
+            'success': False,
+            'error': f'Order confirmation timeout after {timeout} seconds'
+        }
+
+    async def _fallback_to_rest(self, order_params: Dict) -> Dict:
+        """回退到REST API"""
+        try:
+            logger.info("回退到REST API下单")
+
+            if order_params.get('price'):
+                # 限价单
+                result = self.create_limit_order(
+                    order_params.get('symbol'),
+                    order_params.get('side'),
+                    order_params.get('quantity'),
+                    order_params.get('price')
+                )
+            else:
+                # 市价单
+                result = self.create_market_order(
+                    order_params.get('symbol'),
+                    order_params.get('side'),
+                    order_params.get('quantity')
+                )
+
+            if 'error' not in result:
+                return {
+                    'success': True,
+                    'orderId': result.get('id'),
+                    'status': result.get('status', 'unknown'),
+                    **result
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': result['error']
+                }
+
+        except Exception as e:
+            logger.error(f"REST API下单也失败: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    async def disconnect_websocket(self):
+        """断开WebSocket连接"""
+        try:
+            if self.ws_connection:
+                await self.ws_connection.close()
+                self.ws_connection = None
+
+            if self.ws_listen_key:
+                # 删除listen key
+                await self._delete_listen_key()
+                self.ws_listen_key = None
+
+            self.is_connected = False
+            logger.info("WebSocket连接已断开")
+
+        except Exception as e:
+            logger.error(f"断开WebSocket连接失败: {e}")
+
+    async def _delete_listen_key(self):
+        """删除listen key"""
+        try:
+            if not self.api_key or not self.ws_listen_key:
+                return
+
+            url = f"{self.exchange.urls['api']}/v1/listenKey"
+            headers = {
+                'X-MBX-APIKEY': self.api_key,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+
+            data = f"listenKey={self.ws_listen_key}"
+
+            import requests
+            response = requests.delete(url, headers=headers, data=data, timeout=10)
+
+            if response.status_code == 200:
+                logger.info("listen key已删除")
+            else:
+                logger.warning(f"删除listen key失败: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"删除listen key异常: {e}")
+
+    def get_ws_status(self) -> Dict:
+        """获取WebSocket状态"""
+        return {
+            'is_connected': self.is_connected,
+            'listen_key': self.ws_listen_key,
+            'pending_orders_count': len(self.pending_orders),
+            'connection_url': self.ws_url
         }

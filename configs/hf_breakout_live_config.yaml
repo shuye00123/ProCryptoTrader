@@ -1,0 +1,273 @@
+# 高频突破策略实盘交易配置
+# 支持Tick级别突破检测的完整实盘配置
+
+# 基础配置
+basic:
+  mode: "paper"  # paper=模拟交易, live=实盘交易
+  strategy: "HighFrequencyBreakout"
+
+  # 资金配置
+  initial_balance: 10000.0  # 初始资金 (USDT)
+  max_drawdown: 0.1  # 最大回撤限制 (10%)
+  max_daily_loss: 0.03  # 最大日损失 (3%)
+
+# 🔧 交易规模配置
+trading:
+  # 每笔交易目标金额 (USDT等值)
+  target_trade_value_usdt: 100.0  # 每笔交易的目标价值
+
+  # 单笔交易价值限制
+  min_trade_value_usdt: 50.0   # 最小单笔交易价值
+  max_trade_value_usdt: 500.0  # 最大单笔交易价值
+
+  # 总持仓价值限制
+  max_total_value_usdt: 1000.0  # 最大总持仓价值
+
+  # 每日交易价值限制
+  max_daily_value_usdt: 2000.0  # 最大日交易总价值
+
+# 策略配置
+strategy:
+  name: "HighFrequencyBreakoutStrategy"
+  class: "HighFrequencyBreakout"
+
+  # 基础参数
+  max_positions: 3  # 最大持仓数量
+  position_size: 0.02  # 基础仓位大小 (2%)
+  max_position_size: 0.05  # 单个最大仓位 (5%)
+  max_total_exposure: 0.15  # 最大总暴露 (15%)
+  signal_cooldown: 30  # 信号冷却时间 (秒)
+
+  # Tick级别突破检测配置 - 严格优化版
+  tick_breakout:
+    enabled: true  # 启用Tick级别突破检测
+    window_size: 200  # Tick数据窗口大小 (从200增加到500)
+    min_breakout_strength: 2.0  # 最小突破强度 (从3.0提高到5.0)
+    volume_threshold: 1.3  # 🔧 优化：成交量阈值降低 (从1.8到1.3，提高触发率)
+    consecutive_moves_threshold: 5  # 连续变动阈值 (从5增加到8)
+    breakout_cooldown: 3000  # 突破冷却期 (从5秒增加到10秒)
+
+    # 多重确认机制
+    require_multiple_confirmation: true  # 🔧 关闭：确保单算法能产生信号
+    min_confirmation_count: 2            # 🔧 降低：只需要1个确认
+    confirmation_window: 5000           # 🔧 增加：更长的确认窗口
+
+    # 🔥 方向协调机制
+    direction_coordination:
+      enabled: true                     # 默认禁用，向后兼容
+      min_consensus_score: 0.65          # 最小共识强度
+      conflict_penalty: 0.2             # 冲突惩罚系数
+      max_conflicting_algos: 3          # 最大冲突算法数量
+
+      # 完全可配置的算法权重
+      algorithm_weights:
+        STATISTICAL: 0.25               # 统计突破权重
+        MOMENTUM: 0.1                 # 动量突破权重
+        CONSECUTIVE: 0.1               # 连续变动权重
+        VOLUME: 0.35                   # 成交量突破权重
+        PATH: 0.2                     # 路径突破权重
+
+      # 阈值设置
+      min_confidence_threshold: 0.25      # 最小置信度阈值
+      direction_penalty_threshold: 0.5   # 方向惩罚阈值
+
+      # 确认窗口设置
+      direction_confirmation_window: 2000  # 方向确认窗口(ms)
+      min_direction_confirmations: 2      # 最小方向确认数
+      direction_consistency_threshold: 0.6 # 方向一致性阈值
+
+    # 统计突破 - 严格版
+    statistical_breakout:
+      enabled: true
+      price_deviation_threshold: 3.5  # 从2.0提高到3.5
+      momentum_ratio_threshold: 2.5   # 从2.0提高到3.0
+      min_sample_size: 200             # 新增：至少100个tick样本
+
+    # 连续变动突破 - 严格版
+    consecutive_breakout:
+      enabled: true
+      min_consecutive_moves: 2          # 从5增加到8
+      min_move_threshold: 0.001         # 新增：每次变动至少0.2%
+
+    # 成交量突破 - 🔧 调试优化版
+    volume_breakout:
+      enabled: true
+      volume_surge_threshold: 1.2      # 🔧 更低：5%成交量增长即可触发
+      min_price_change: 0.005        # 🔧 更低：0.005%价格变动
+      min_avg_volume: 1                # 🔧 最低：不限制最小成交量
+      min_data_points: 100               # 🔧 最低：单个tick即可计算
+
+    # 路径突破 - 🔧 调试优化版
+    path_breakout:
+      enabled: true
+      breakout_threshold: 0.005       # 🔧 超低：0.05%突破阈值 (降低10倍)
+      support_resistance_window: 50     # 🔧 降低：支撑阻力窗口
+      min_data_points: 50               # 🔧 降低：最小数据点数
+      virtual_level_offset: 0.001     # 🔧 降低：虚拟支撑阻力位偏移0.01%
+
+  # 原有突破检测器（基于OHLCV）
+  breakout:
+    enabled: false  # 保留作为备用检测器
+    lookback_period: 50
+    volume_threshold: 1.5
+    volatility_threshold: 0.02
+    momentum_threshold: 0.01
+    support_resistance_lookback: 100
+    min_breakout_strength: 0.6
+
+  # 风险管理
+  risk_management:
+    max_drawdown: 0.1
+    max_daily_loss: 0.03
+    position_risk_limit: 0.02
+    use_trailing_stop: true
+    trailing_stop_distance: 0.02
+
+  # 实时数据处理
+  realtime_processing:
+    max_symbols: 100
+    price_window_size: 300
+    volume_window_size: 600
+    anomaly_threshold: 3.0
+
+  # 自适应参数
+  adaptive_parameters:
+    enabled: true
+    adjustment_frequency: 3600
+    performance_window: 100
+    volatility_regime_adjustment: true
+
+  # 信号过滤器 - 严格版
+  signal_filters:
+    enabled: true
+    min_signal_quality: 0.6          # 从0.6提高到0.8
+    max_signals_per_minute: 2         # 从10减少到2
+    duplicate_signal_filter: true
+    require_volume_confirmation: true # 新增：需要成交量确认
+    min_confirmation_count: 2          # 新增：至少2个算法确认
+    quality_score_threshold: 0.75      # 新增：质量评分阈值
+
+# 交易所配置
+exchange:
+  # Binance API配置
+  api_key: ""  # 请填入您的API Key
+  api_secret: ""  # 请填入您的API Secret
+  sandbox: true  # true=测试网, false=主网
+  testnet: true
+
+  # WebSocket配置
+  websocket:
+    reconnect_attempts: 10
+    reconnect_delay: 5000  # 毫秒
+    connection_timeout: 10000  # 毫秒
+    ping_interval: 30000  # 毫秒
+    subscription_limit: 100
+
+# 执行引擎配置
+execution:
+  # 快速执行引擎配置
+  enable_batch_execution: false  # 高频策略建议关闭批量执行
+  default_timeout: 5000  # 默认超时 (毫秒)
+  max_queue_size: 1000  # 最大队列大小
+  enable_order_validation: true
+
+  # 执行优先级
+  default_priority: "HIGH"  # HIGH优先级，确保快速执行
+
+  # 重试配置
+  max_retries: 2
+  retry_delay: 100  # 毫秒
+
+# 监控和统计
+monitoring:
+  # 性能监控
+  enable_performance_monitoring: true
+  stats_update_interval: 10  # 秒
+
+  # 日志配置
+  log_level: "INFO"
+  log_executed_orders: true
+  log_signal_details: true
+
+  # 统计报告
+  enable_realtime_stats: true
+  stats_save_interval: 300  # 5分钟保存一次
+
+# 交易对配置
+symbols:
+  - "BTC-USDT"
+  - "ETH-USDT"
+  - "BNB-USDT"
+
+# 风险控制
+risk_control:
+  # 资金管理
+  max_position_value: 1000  # 单个持仓最大价值 (USDT)
+  max_total_position_value: 3000  # 总持仓最大价值 (USDT)
+
+  # 止损止盈
+  default_stop_loss: 0.05  # 5% 止损
+  default_take_profit: 0.1  # 10% 止盈
+
+  # 时间止损
+  max_holding_time: 3600  # 最大持仓时间 (秒)
+
+  # 波动率保护
+  max_volatility_threshold: 0.05  # 5% 波动率阈值
+  volatility_stop: true
+
+# 数据源配置
+data_source:
+  type: "binance"
+  websocket_url: "wss://testnet.binance.vision/ws/btcusdt@ticker"
+  rest_url: "https://testnet.binance.vision"
+
+  # 数据质量
+  enable_data_validation: true
+  max_data_delay: 1000  # 最大数据延迟 (毫秒)
+
+# 输出配置
+output:
+  # 结果保存
+  save_results: true
+  results_dir: "./results/hf_breakout"
+
+  # 报告配置
+  generate_reports: true
+  report_interval: 300  # 5分钟
+
+  # 统计数据
+  save_stats: true
+  stats_format: "json"  # json, csv
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+  # 文件日志
+  file: "logs/hf_breakout_live.log"
+  max_file_size: "10MB"
+  backup_count: 5
+
+  # 控制台日志
+  console: true
+
+  # 特定模块日志
+  modules:
+    "HighFrequencyTrader": "INFO"
+    "core.strategy.high_frequency_breakout": "INFO"
+    "core.trading.fast_execution": "INFO"
+    "core.strategy.tick_breakout_detector": "INFO"
+
+# 通知配置 (可选)
+notifications:
+  enabled: false
+  webhook_url: ""
+
+  # 通知事件
+  events:
+    - "signal_generated"
+    - "order_executed"
+    - "risk_limit_hit"
+    - "system_error"

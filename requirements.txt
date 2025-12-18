@@ -9,6 +9,13 @@ numpy>=1.24.0,<2.0.0           # Numerical computing and array operations
 pyarrow>=10.0.0                # High-performance data storage and Parquet support
 
 # ============================================================================
+# WEBSOCKET AND REAL-TIME DATA LIBRARIES
+# ============================================================================
+websockets>=11.0.0               # WebSocket client implementation for real-time data
+aiohttp>=3.8.0                  # Async HTTP client for supplementary API calls
+asyncio-mqtt>=0.13.0            # Async MQTT client (for future extensions)
+
+# ============================================================================
 # TRADING AND API LIBRARIES
 # ============================================================================
 ccxt>=4.0.0                     # Cryptocurrency exchange API interface

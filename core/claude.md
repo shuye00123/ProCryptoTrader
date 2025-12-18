@@ -29,12 +29,17 @@ core/
 │   ├── martingale_strategy.py  # 马丁格尔策略
 │   ├── dual_ma_strategy.py    # 双均线策略
 │   ├── enhanced_base_strategy.py  # 增强基类
-│   └── enhanced_ma_strategy.py     # 增强均线策略
+│   ├── enhanced_ma_strategy.py     # 增强均线策略
+│   ├── high_frequency_breakout.py  # 🔥 高频突破策略 (最新)
+│   ├── tick_breakout_detector.py   # 🔥 Tick级别突破检测器 (最新)
+│   ├── traditional_grid_strategy.py # 传统网格策略
+│   └── [其他网格策略变体]
 ├── backtest/               # 回测引擎
 │   ├── backtester.py      # 回测引擎
 │   ├── metrics.py         # 性能指标计算
 │   └── report_generator.py # 报告生成器
 ├── trading/               # 交易执行层
+│   ├── fast_execution.py # 🔥 快速执行引擎 (最新)
 │   ├── order_manager.py  # 订单管理
 │   └── position_manager.py # 持仓管理
 ├── exchange/              # 交易所接口
@@ -43,6 +48,7 @@ core/
 │   └── okx_api.py         # OKX API
 ├── live/                  # 实盘交易
 │   ├── live_trader.py     # 实盘交易引擎
+│   ├── high_frequency_trader.py # 🔥 高频交易器 (最新)
 │   └── config_loader.py   # 配置加载器
 ├── services/              # 服务层
 │   ├── execution_service.py # 执行服务
