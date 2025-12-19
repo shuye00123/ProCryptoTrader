@@ -152,8 +152,8 @@ exchange:
   # Binance API配置
   api_key: ""  # 请填入您的API Key
   api_secret: ""  # 请填入您的API Secret
-  sandbox: true  # true=测试网, false=主网
-  testnet: true
+  sandbox: false  # true=测试网, false=主网
+  testnet: false
 
   # WebSocket配置
   websocket:
@@ -271,3 +271,40 @@ notifications:
     - "order_executed"
     - "risk_limit_hit"
     - "system_error"
+
+# Tick数据转存配置
+tick_data_persistence:
+  # 基础配置
+  enabled: true                    # 是否启用转存功能
+  save_interval_seconds: 300       # 转存间隔(5分钟)
+
+  # 存储配置
+  storage:
+    base_path: "data/tick"         # 基础存储路径
+    exchange: "binance"            # 交易所名称
+    compression: "snappy"          # 压缩算法 (snappy, gzip, brotli, none)
+    file_split_hours: 1            # 按小时分割文件
+
+  # 内存缓冲配置
+  buffer:
+    max_size_mb: 100              # 最大缓冲大小(MB)
+    max_ticks_per_symbol: 50000   # 每个交易对最大tick数
+    cleanup_ratio: 0.8            # 清理阈值
+
+  # 性能配置
+  performance:
+    batch_size: 1000              # 批量写入大小
+    max_concurrent_writes: 4      # 最大并发写入数
+    write_timeout_seconds: 30     # 写入超时时间
+
+  # 数据质量配置
+  integrity:
+    enable_validation: true       # 启用数据验证
+    checksum_enabled: true        # 启用校验和
+    auto_repair: false           # 自动修复损坏数据
+
+  # 监控配置
+  monitoring:
+    enable_metrics: true         # 启用指标收集
+    log_level: "INFO"           # 日志级别
+    alert_memory_threshold: 80  # 内存使用告警阈值(%)
