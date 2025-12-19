@@ -24,6 +24,29 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError, Conne
 # 设置日志
 logger = logging.getLogger(__name__)
 
+# Tick数据管理器导入（延迟导入避免循环依赖）
+TICK_MANAGER = None
+
+
+def set_tick_data_manager(manager):
+    """设置全局Tick数据管理器
+
+    Args:
+        manager: TickDataManager实例
+    """
+    global TICK_MANAGER
+    TICK_MANAGER = manager
+    logger.info("Tick数据管理器已设置到WebSocket客户端")
+
+
+def get_tick_data_manager():
+    """获取当前设置的Tick数据管理器
+
+    Returns:
+        TickDataManager实例或None
+    """
+    return TICK_MANAGER
+
 
 @dataclass
 class TickerData:
@@ -166,6 +189,25 @@ class BinanceWebSocketClient:
                 callback(ticker)
             except Exception as e:
                 logger.error(f"Ticker回调函数执行失败: {e}")
+
+        # 🔥 集成Tick数据管理器 - 最小侵入式集成
+        if TICK_MANAGER:
+            try:
+                import asyncio
+                # 如果在异步上下文中，直接调用；否则创建新任务
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # 在异步上下文中，创建任务
+                        asyncio.create_task(TICK_MANAGER.collect_tick(ticker))
+                    else:
+                        # 不在异步上下文中，运行一次性任务
+                        loop.run_until_complete(TICK_MANAGER.collect_tick(ticker))
+                except RuntimeError:
+                    # 没有事件循环，创建新的
+                    asyncio.run(TICK_MANAGER.collect_tick(ticker))
+            except Exception as e:
+                logger.error(f"Tick数据收集失败: {e}")
 
     def _call_error_callbacks(self, error: Exception):
         """调用所有错误回调函数"""
