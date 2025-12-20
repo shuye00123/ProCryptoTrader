@@ -126,7 +126,9 @@ class AsyncTickSaver:
             return True
 
         start_time = time.time()
-        file_key = self._get_file_key(symbol, tick_data_list[-1].event_time)
+        # 验证时间戳，避免year 57939错误
+        validated_event_time = validate_and_normalize_timestamp(tick_data_list[-1].event_time)
+        file_key = self._get_file_key(symbol, validated_event_time)
 
         try:
             # 获取文件写入锁
@@ -241,8 +243,10 @@ class AsyncTickSaver:
         Returns:
             是否写入成功
         """
+        # 验证时间戳，避免year 57939错误
+        validated_event_time = validate_and_normalize_timestamp(tick_data_list[0].event_time)
         # 获取文件路径
-        file_path = self._get_file_path(symbol, tick_data_list[0].event_time)
+        file_path = self._get_file_path(symbol, validated_event_time)
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 转换为DataFrame
