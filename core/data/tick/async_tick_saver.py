@@ -26,6 +26,48 @@ from .config_models import TickDataConfig, PerformanceConfig
 logger = logging.getLogger(__name__)
 
 
+def validate_and_normalize_timestamp(raw_timestamp: int) -> int:
+    """验证并标准化时间戳
+
+    基于策略代码中已验证的时间戳处理逻辑
+    处理不同时间戳单位：秒级、毫秒级、微秒级
+
+    Args:
+        raw_timestamp: 原始时间戳
+
+    Returns:
+        标准化的毫秒级时间戳
+    """
+    try:
+        current_time_ms = int(datetime.now().timestamp() * 1000)
+
+        # 检查时间戳类型并转换
+        if raw_timestamp < 1e12:  # 秒级时间戳（约332年前的秒数 < 1e12）
+            timestamp_ms = raw_timestamp * 1000
+            logger.debug(f"[TIMESTAMP] 检测到秒级时间戳 {raw_timestamp}，转换为毫秒级 {timestamp_ms}")
+        elif raw_timestamp > 1e15:  # 可能是微秒级时间戳
+            timestamp_ms = raw_timestamp // 1000
+            logger.debug(f"[TIMESTAMP] 检测到微秒级时间戳 {raw_timestamp}，转换为毫秒级 {timestamp_ms}")
+        else:  # 毫秒级时间戳
+            timestamp_ms = raw_timestamp
+
+        # 时间戳合理性验证
+        time_diff = abs(timestamp_ms - current_time_ms)
+        if time_diff > 24 * 3600 * 1000:  # 超过24小时
+            logger.warning(f"[TIMESTAMP] 时间戳异常: {timestamp_ms}, 当前时间: {current_time_ms}, 差异: {time_diff/3600/1000:.1f}小时")
+            # 使用当前时间作为备选
+            logger.warning(f"[TIMESTAMP] 使用当前时间替代异常时间戳")
+            timestamp_ms = current_time_ms
+        elif time_diff > 3600 * 1000:  # 超过1小时
+            logger.warning(f"[TIMESTAMP] 时间戳差异较大: {time_diff/3600/1000:.1f}小时，原始时间戳: {raw_timestamp}")
+
+        return timestamp_ms
+
+    except Exception as e:
+        logger.error(f"[TIMESTAMP] 时间戳验证失败: {e}，使用当前时间")
+        return int(datetime.now().timestamp() * 1000)
+
+
 class AsyncTickSaver:
     """异步Tick数据转存器
 
@@ -288,6 +330,11 @@ class AsyncTickSaver:
         # 批量转换为字典列表
         data_dicts = []
         for tick in tick_data_list:
+            # 验证和标准化时间戳
+            normalized_open_time = validate_and_normalize_timestamp(tick.open_time)
+            normalized_close_time = validate_and_normalize_timestamp(tick.close_time)
+            normalized_event_time = validate_and_normalize_timestamp(tick.event_time)
+
             data_dicts.append({
                 'symbol': tick.symbol,
                 'price': float(tick.price),
@@ -299,9 +346,9 @@ class AsyncTickSaver:
                 'low_price': float(tick.low_price),
                 'volume': float(tick.volume),
                 'quote_volume': float(tick.quote_volume),
-                'open_time': pd.to_datetime(tick.open_time, unit='ms', utc=True),
-                'close_time': pd.to_datetime(tick.close_time, unit='ms', utc=True),
-                'event_time': pd.to_datetime(tick.event_time, unit='ms', utc=True),
+                'open_time': pd.to_datetime(normalized_open_time, unit='ms', utc=True),
+                'close_time': pd.to_datetime(normalized_close_time, unit='ms', utc=True),
+                'event_time': pd.to_datetime(normalized_event_time, unit='ms', utc=True),
                 'first_id': int(tick.first_id),
                 'last_id': int(tick.last_id),
                 'count': int(tick.count),
@@ -321,8 +368,11 @@ class AsyncTickSaver:
         Returns:
             文件键
         """
+        # 验证和标准化时间戳
+        normalized_timestamp = validate_and_normalize_timestamp(timestamp)
+
         normalized_symbol = symbol.replace('/', '-')
-        dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+        dt = datetime.fromtimestamp(normalized_timestamp / 1000, tz=timezone.utc)
         return f"{normalized_symbol}_{dt.year:04d}{dt.month:02d}{dt.day:02d}{dt.hour:02d}"
 
     def _get_file_path(self, symbol: str, timestamp: int) -> Path:
