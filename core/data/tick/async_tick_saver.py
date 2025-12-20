@@ -240,8 +240,7 @@ class AsyncTickSaver:
                 temp_path,
                 engine='pyarrow',
                 compression=compression,
-                index=False,
-                write_metadata_file=True
+                index=False
             )
 
             # 生成校验和
@@ -285,6 +284,46 @@ class AsyncTickSaver:
         if not tick_data_list:
             return pd.DataFrame()
 
+        def safe_timestamp_to_datetime(timestamp: int, field_name: str = "", symbol: str = ""):
+            """安全的时间戳转换，只在异常时修复"""
+            if timestamp == 0:
+                return pd.NaT  # 返回Not a Time
+
+            try:
+                # 尝试直接转换
+                dt = pd.to_datetime(timestamp, unit='ms', utc=True)
+                return dt
+            except Exception as e:
+                # 转换失败，说明时间戳异常
+                logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}时间戳异常: {timestamp}")
+
+                # 检查时间戳类型并修复
+                fixed_timestamp = timestamp
+                if timestamp > 1e15:  # 超过15位数，很可能是毫秒时间戳被错误放大了
+                    # 尝试除以1000
+                    fixed_timestamp = timestamp // 1000
+                    try:
+                        dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
+                        logger.info(f"[SAFE_CONVERT] {symbol} {field_name}修复: {timestamp} → {fixed_timestamp} → {dt}")
+                        return dt
+                    except:
+                        pass
+                elif timestamp < 1e12:  # 秒级时间戳
+                    fixed_timestamp = timestamp * 1000
+                    try:
+                        dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
+                        logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换: {timestamp} → {fixed_timestamp} → {dt}")
+                        return dt
+                    except:
+                        pass
+
+                # 如果修复仍然失败，使用当前时间
+                import time
+                current_ms = int(time.time() * 1000)
+                dt_current = pd.to_datetime(current_ms, unit='ms', utc=True)
+                logger.warning(f"[SAFE_CONVERT] {symbol} {field_name}使用当前时间: {timestamp} → {dt_current}")
+                return dt_current
+
         # 批量转换为字典列表
         data_dicts = []
         for tick in tick_data_list:
@@ -299,9 +338,9 @@ class AsyncTickSaver:
                 'low_price': float(tick.low_price),
                 'volume': float(tick.volume),
                 'quote_volume': float(tick.quote_volume),
-                'open_time': pd.to_datetime(tick.open_time, unit='ms', utc=True),
-                'close_time': pd.to_datetime(tick.close_time, unit='ms', utc=True),
-                'event_time': pd.to_datetime(tick.event_time, unit='ms', utc=True),
+                'open_time': safe_timestamp_to_datetime(tick.open_time, "open_time", tick.symbol),
+                'close_time': safe_timestamp_to_datetime(tick.close_time, "close_time", tick.symbol),
+                'event_time': safe_timestamp_to_datetime(tick.event_time, "event_time", tick.symbol),
                 'first_id': int(tick.first_id),
                 'last_id': int(tick.last_id),
                 'count': int(tick.count),
@@ -321,8 +360,26 @@ class AsyncTickSaver:
         Returns:
             文件键
         """
+        def safe_timestamp_for_file_key(timestamp: int) -> int:
+            """为文件键生成安全的时间戳"""
+            try:
+                # 尝试转换
+                dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+                return timestamp
+            except:
+                # 转换失败，修复时间戳
+                if timestamp > 1e15:  # 超过15位数
+                    return timestamp // 1000
+                elif timestamp < 1e12:  # 秒级时间戳
+                    return timestamp * 1000
+                else:
+                    # 其他情况，使用当前时间
+                    import time
+                    return int(time.time() * 1000)
+
         normalized_symbol = symbol.replace('/', '-')
-        dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+        safe_timestamp = safe_timestamp_for_file_key(timestamp)
+        dt = datetime.fromtimestamp(safe_timestamp / 1000, tz=timezone.utc)
         return f"{normalized_symbol}_{dt.year:04d}{dt.month:02d}{dt.day:02d}{dt.hour:02d}"
 
     def _get_file_path(self, symbol: str, timestamp: int) -> Path:
