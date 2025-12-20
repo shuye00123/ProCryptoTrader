@@ -396,24 +396,60 @@ class AsyncTickSaver:
         """
         def safe_timestamp_for_file_key(timestamp: int) -> int:
             """为文件键生成安全的时间戳"""
-            try:
-                # 尝试转换
-                dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+            logger.info(f"[FILE_KEY] 原始时间戳: {timestamp}")
+
+            # 检查时间戳合理性范围
+            current_year = datetime.now().year
+            min_timestamp = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
+            max_timestamp = datetime(2030, 12, 31, tzinfo=timezone.utc).timestamp() * 1000
+
+            # 如果时间戳在合理范围内，直接返回
+            if min_timestamp <= timestamp <= max_timestamp:
+                logger.info(f"[FILE_KEY] 时间戳正常，直接使用: {timestamp}")
                 return timestamp
-            except:
-                # 转换失败，修复时间戳
-                if timestamp > 1e15:  # 超过15位数
-                    return timestamp // 1000
-                elif timestamp < 1e12:  # 秒级时间戳
-                    return timestamp * 1000
-                else:
-                    # 其他情况，使用当前时间
-                    import time
-                    return int(time.time() * 1000)
+
+            logger.warning(f"[FILE_KEY] 时间戳异常，尝试修复: {timestamp}")
+
+            # 修复异常时间戳
+            if timestamp > 1e18:  # 可能是纳秒级时间戳
+                fixed_timestamp = timestamp // 1_000_000
+                if min_timestamp <= fixed_timestamp <= max_timestamp:
+                    logger.info(f"[FILE_KEY] 纳秒转毫秒修复成功: {timestamp} → {fixed_timestamp}")
+                    return fixed_timestamp
+
+            if timestamp > 1e15:  # 可能是微秒级或错误放大的毫秒时间戳
+                for divisor in [1000, 1_000_000, 1_000_000_000]:
+                    fixed_timestamp = timestamp // divisor
+                    if min_timestamp <= fixed_timestamp <= max_timestamp:
+                        logger.info(f"[FILE_KEY] 除法修复成功(除{divisor}): {timestamp} → {fixed_timestamp}")
+                        return fixed_timestamp
+
+            elif timestamp < 1e12:  # 可能是秒级时间戳
+                fixed_timestamp = timestamp * 1000
+                if min_timestamp <= fixed_timestamp <= max_timestamp:
+                    logger.info(f"[FILE_KEY] 秒级修复成功: {timestamp} → {fixed_timestamp}")
+                    return fixed_timestamp
+
+            # 所有修复都失败，使用当前时间
+            import time
+            current_ms = int(time.time() * 1000)
+            logger.error(f"[FILE_KEY] 修复失败，使用当前时间: {timestamp} → {current_ms}")
+            return current_ms
 
         normalized_symbol = symbol.replace('/', '-')
         safe_timestamp = safe_timestamp_for_file_key(timestamp)
-        dt = datetime.fromtimestamp(safe_timestamp / 1000, tz=timezone.utc)
+
+        try:
+            dt = datetime.fromtimestamp(safe_timestamp / 1000, tz=timezone.utc)
+            logger.info(f"[FILE_KEY] 时间戳转换成功: {safe_timestamp} → {dt}")
+        except Exception as e:
+            logger.error(f"[FILE_KEY] 时间戳转换失败: {safe_timestamp}, 错误: {e}")
+            # 使用当前时间作为备选
+            import time
+            current_ms = int(time.time() * 1000)
+            dt = datetime.fromtimestamp(current_ms / 1000, tz=timezone.utc)
+            logger.info(f"[FILE_KEY] 使用当前时间: {dt}")
+
         return f"{normalized_symbol}_{dt.year:04d}{dt.month:02d}{dt.day:02d}{dt.hour:02d}"
 
     def _get_file_path(self, symbol: str, timestamp: int) -> Path:
