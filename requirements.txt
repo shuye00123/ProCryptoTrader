@@ -1,5 +1,5 @@
 # ProCryptoTrader - Professional Cryptocurrency Quantitative Trading System
-# Updated: 2025-12-18
+# Updated: 2025-12-20
 # Python Version: >=3.8 (Recommended: 3.10+)
 
 # ============================================================================
@@ -8,6 +8,7 @@
 pandas>=2.3.0,<3.0.0             # Core data processing and time series analysis
 numpy>=2.3.0,<3.0.0              # Numerical computing and array operations
 pyarrow>=21.0.0                  # High-performance data storage and Parquet support
+                                   # Required for tick data persistence (Parquet format)
 
 # ============================================================================
 # WEBSOCKET AND REAL-TIME DATA LIBRARIES
@@ -33,6 +34,7 @@ scipy>=1.16.0                   # Scientific computing and statistical analysis
 # CONFIGURATION AND UTILITIES
 # ============================================================================
 PyYAML>=6.0.3                  # YAML configuration file parsing
+                                   # Required for tick data persistence configuration
 python-dotenv>=1.1.1            # Environment variable management
 
 # ============================================================================
@@ -40,6 +42,7 @@ python-dotenv>=1.1.1            # Environment variable management
 # ============================================================================
 tables>=3.10.0                 # HDF5 support for large dataset storage
 psutil>=7.1.0                   # System monitoring and resource usage statistics
+                                   # Required for tick data persistence (memory monitoring)
 orjson>=3.9.0                   # High-performance JSON processing (if available)
 
 # ============================================================================
@@ -48,6 +51,23 @@ orjson>=3.9.0                   # High-performance JSON processing (if available
 # Note: asyncio is part of Python standard library (Python 3.7+)
 # Additional async support packages (optional)
 # aiofiles>=23.0.0               # Async file operations (if needed)
+
+# ============================================================================
+# TICK DATA PERSISTENCE REQUIREMENTS
+# ============================================================================
+# The tick data persistence feature requires the following dependencies:
+# - pandas: DataFrame manipulation and Parquet file operations
+# - pyarrow: Parquet format support and high-performance columnar storage
+# - psutil: System monitoring and memory usage tracking
+# - PyYAML: Configuration file parsing for tick persistence settings
+# - asyncio: Async processing (built-in, Python 3.7+)
+# - pathlib: Path manipulation (built-in, Python 3.4+)
+# - concurrent.futures: Thread pool execution (built-in, Python 3.2+)
+# - datetime: Time handling (built-in)
+# - typing: Type hints (built-in, Python 3.5+)
+# - json: JSON serialization (built-in)
+# - hashlib: Checksum calculation (built-in)
+# All required dependencies are listed above in their respective sections.
 
 # ============================================================================
 # DEVELOPMENT AND TESTING (Comment out for production)
