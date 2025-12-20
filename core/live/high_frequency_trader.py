@@ -28,6 +28,7 @@ from ..trading.fast_execution import FastExecutionEngine
 from ..utils.config import load_config
 from ..utils.logger import get_logger, setup_logging
 from ..utils.async_logger_fix import setup_async_logging_fix
+from ..data.tick.integration import initialize_tick_data_collection
 
 # 应用异步日志修复 - 确保所有异步线程的日志都能正确输出
 # 延迟到配置加载后再调用，这样可以正确设置日志级别
@@ -131,6 +132,22 @@ class HighFrequencyTrader:
         """异步初始化所有组件"""
         try:
             logger.info("开始初始化高频交易组件...")
+
+            # 🔥 0. 初始化Tick数据管理器（如果配置了的话）
+            tick_config = self.config.get('tick_data_persistence', {})
+            if tick_config.get('enabled', False):
+                logger.info("正在初始化Tick数据管理器...")
+                try:
+                    tick_success = await initialize_tick_data_collection(str(self.config_path))
+                    if tick_success:
+                        logger.info("✅ Tick数据管理器初始化成功 - 将自动保存所有tick数据")
+                    else:
+                        logger.warning("⚠️ Tick数据管理器初始化失败 - 将不会保存tick数据")
+                except Exception as tick_error:
+                    logger.error(f"❌ Tick数据管理器初始化异常: {tick_error}")
+                    logger.info("继续运行但不保存tick数据")
+            else:
+                logger.info("Tick数据转存功能已禁用 - 不保存tick数据到本地")
 
             # 1. 初始化交易所接口
             exchange_config = self.config.get('exchange', {})
