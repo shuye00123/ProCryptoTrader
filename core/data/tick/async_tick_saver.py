@@ -286,45 +286,76 @@ class AsyncTickSaver:
             return pd.DataFrame()
 
         def safe_timestamp_to_datetime(timestamp: int, field_name: str = "", symbol: str = ""):
-            """安全的时间戳转换，只在异常时修复"""
-            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}时间戳: {timestamp}")
+            """安全的时间戳转换，处理各种异常时间戳"""
+            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}原始时间戳: {timestamp}")
 
             if timestamp == 0:
+                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}时间戳为0，返回NaT")
                 return pd.NaT  # 返回Not a Time
 
-            try:
-                # 尝试直接转换
-                dt = pd.to_datetime(timestamp, unit='ms', utc=True)
-                return dt
-            except Exception as e:
-                # 转换失败，说明时间戳异常
-                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}时间戳异常: {timestamp}")
+            # 检查时间戳是否在合理范围内
+            current_year = datetime.now().year
+            # 允许的时间范围：2000年到2030年
+            min_timestamp = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
+            max_timestamp = datetime(2030, 12, 31, tzinfo=timezone.utc).timestamp() * 1000
 
-                # 检查时间戳类型并修复
-                fixed_timestamp = timestamp
-                if timestamp > 1e15:  # 超过15位数，很可能是毫秒时间戳被错误放大了
-                    # 尝试除以1000
-                    fixed_timestamp = timestamp // 1000
+            # 如果时间戳明显不在合理范围内，先进行修复尝试
+            if timestamp < min_timestamp or timestamp > max_timestamp:
+                logger.warning(f"[SAFE_CONVERT] {symbol} {field_name}时间戳超出合理范围: {timestamp}")
+
+                # 修复尝试1：如果时间戳过大，尝试除以不同的因子
+                if timestamp > 1e18:  # 可能是纳秒级时间戳
+                    fixed_timestamp = timestamp // 1_000_000
+                    logger.info(f"[SAFE_CONVERT] {symbol} {field_name}尝试纳秒转毫秒: {timestamp} → {fixed_timestamp}")
                     try:
                         dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
-                        logger.info(f"[SAFE_CONVERT] {symbol} {field_name}修复: {timestamp} → {fixed_timestamp} → {dt}")
-                        return dt
+                        if min_timestamp <= fixed_timestamp <= max_timestamp:
+                            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}纳秒转毫秒成功: {dt}")
+                            return dt
                     except:
                         pass
-                elif timestamp < 1e12:  # 秒级时间戳
+
+                if timestamp > 1e15:  # 可能是微秒级或错误放大的毫秒时间戳
+                    for divisor in [1000, 1_000_000, 1_000_000_000]:
+                        fixed_timestamp = timestamp // divisor
+                        if min_timestamp <= fixed_timestamp <= max_timestamp:
+                            try:
+                                dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
+                                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}修复成功(除{divisor}): {timestamp} → {fixed_timestamp} → {dt}")
+                                return dt
+                            except:
+                                pass
+                    logger.warning(f"[SAFE_CONVERT] {symbol} {field_name}所有除法修复都失败")
+
+                # 修复尝试2：如果时间戳过小，可能是秒级
+                elif timestamp < 1e12:  # 可能是秒级时间戳
                     fixed_timestamp = timestamp * 1000
                     try:
                         dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
-                        logger.info(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换: {timestamp} → {fixed_timestamp} → {dt}")
-                        return dt
+                        if min_timestamp <= fixed_timestamp <= max_timestamp:
+                            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换成功: {timestamp} → {fixed_timestamp} → {dt}")
+                            return dt
                     except:
                         pass
 
-                # 如果修复仍然失败，使用当前时间
+                # 所有修复尝试都失败，使用当前时间
                 import time
                 current_ms = int(time.time() * 1000)
                 dt_current = pd.to_datetime(current_ms, unit='ms', utc=True)
-                logger.warning(f"[SAFE_CONVERT] {symbol} {field_name}使用当前时间: {timestamp} → {dt_current}")
+                logger.error(f"[SAFE_CONVERT] {symbol} {field_name}修复失败，使用当前时间: 原始{timestamp} → 当前{dt_current}")
+                return dt_current
+
+            # 时间戳在合理范围内，直接转换
+            try:
+                dt = pd.to_datetime(timestamp, unit='ms', utc=True)
+                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}直接转换成功: {timestamp} → {dt}")
+                return dt
+            except Exception as e:
+                logger.error(f"[SAFE_CONVERT] {symbol} {field_name}转换失败(时间戳{timestamp}): {e}")
+                # 使用当前时间作为最后备选
+                import time
+                current_ms = int(time.time() * 1000)
+                dt_current = pd.to_datetime(current_ms, unit='ms', utc=True)
                 return dt_current
 
         # 批量转换为字典列表
