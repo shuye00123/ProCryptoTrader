@@ -73,11 +73,35 @@ class TickerData:
     def from_dict(cls, data: Dict) -> 'TickerData':
         """从字典创建TickerData实例"""
         try:
+            import time
 
-            # 提取所有时间字段
-            event_time = int(data['E']) if data.get('E') else 0
+            # 时间戳验证和标准化函数
+            def validate_timestamp(raw_timestamp: int) -> int:
+                """验证并标准化时间戳"""
+                if raw_timestamp == 0:
+                    return 0
 
-            final_timestamp = event_time
+                current_time_ms = int(time.time() * 1000)
+
+                # 检查时间戳类型并转换
+                if raw_timestamp < 1e12:  # 秒级时间戳
+                    timestamp_ms = raw_timestamp * 1000
+                elif raw_timestamp > 1e15:  # 微秒级时间戳
+                    timestamp_ms = raw_timestamp // 1000
+                else:  # 毫秒级时间戳
+                    timestamp_ms = raw_timestamp
+
+                # 时间戳合理性验证
+                time_diff = abs(timestamp_ms - current_time_ms)
+                if time_diff > 24 * 3600 * 1000:  # 超过24小时
+                    timestamp_ms = current_time_ms
+
+                return timestamp_ms
+
+            # 提取并验证所有时间字段
+            event_time = validate_timestamp(int(data['E'])) if data.get('E') else 0
+            open_time = validate_timestamp(int(data['O'])) if data.get('O') else 0
+            close_time = validate_timestamp(int(data['C'])) if data.get('C') else 0
 
             return cls(
                 symbol=data['s'],
@@ -90,9 +114,9 @@ class TickerData:
                 low_price=float(data['l']) if data.get('l') else 0.0,            # 24小时最低价 (l字段)
                 volume=float(data['v']) if data.get('v') else 0.0,               # 24小时成交量 (v字段)
                 quote_volume=float(data['q']) if data.get('q') else 0.0,         # 24小时成交额 (q字段)
-                open_time=int(data['O']) if data.get('O') else 0,               # 统计开始时间 (O字段)
-                close_time=int(data['C']) if data.get('C') else 0,              # 统计截止时间 (C字段)
-                event_time=final_timestamp,                                    # WebSocket事件时间 (E字段)
+                open_time=open_time,                                           # 统计开始时间 (O字段) - 已验证
+                close_time=close_time,                                         # 统计截止时间 (C字段) - 已验证
+                event_time=event_time,                                         # WebSocket事件时间 (E字段) - 已验证
                 first_id=int(data['F']) if data.get('F') else 0,               # 24小时内第一笔成交交易ID (F字段)
                 last_id=int(data['L']) if data.get('L') else 0,                # 24小时内最后一笔成交交易ID (L字段)
                 count=int(data['n']) if data.get('n') else 0,                  # 24小时内成交数量 (n字段)
