@@ -152,8 +152,8 @@ exchange:
   # Binance API配置
   api_key: ""  # 请填入您的API Key
   api_secret: ""  # 请填入您的API Secret
-  sandbox: false  # true=测试网, false=主网
-  testnet: false
+  sandbox: true  # true=测试网, false=主网
+  testnet: true
 
   # WebSocket配置
   websocket:
