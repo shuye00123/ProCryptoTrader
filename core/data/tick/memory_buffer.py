@@ -231,9 +231,12 @@ class MemoryBuffer:
             self._update_memory_stats()
 
             cleanup_time = time.time() - start_time
+            buffer_memory_mb = self._get_memory_usage_mb()
+            process_memory_mb = self._get_process_memory_mb()
             logger.info(f"缓冲区清理完成 - 耗时: {cleanup_time:.3f}s, "
                        f"清除: {cleared_count}条数据, "
-                       f"当前内存: {current_memory_mb:.1f}MB")
+                       f"Tick缓冲内存: {buffer_memory_mb:.1f}MB, "
+                       f"进程总内存: {process_memory_mb:.1f}MB")
 
         except Exception as e:
             logger.error(f"缓冲区清理失败: {e}")
@@ -260,10 +263,36 @@ class MemoryBuffer:
             logger.error(f"清理访问时间记录失败: {e}")
 
     def _get_memory_usage_mb(self) -> float:
-        """获取当前内存使用量（MB）
+        """获取当前Tick数据缓冲的实际内存使用量（MB）
 
         Returns:
-            内存使用量（MB）
+            Tick数据缓冲的内存使用量（MB），而不是整个进程的内存
+        """
+        try:
+            if not self._buffers:
+                return 0.0
+
+            # 估算Tick数据缓冲的实际内存使用量
+            total_memory_bytes = 0
+
+            for symbol, buffer in self._buffers.items():
+                if buffer:
+                    # 每个TickerData对象大约占用的内存（字节）
+                    # 包括对象开销 + 数据字段
+                    estimated_size_per_tick = 200  # 估算每个tick对象约200字节
+                    total_memory_bytes += len(buffer) * estimated_size_per_tick
+
+            # 转换为MB
+            return total_memory_bytes / 1024 / 1024
+
+        except Exception:
+            return 0.0
+
+    def _get_process_memory_mb(self) -> float:
+        """获取整个进程的内存使用量（MB）
+
+        Returns:
+            整个进程的内存使用量（MB）
         """
         try:
             process = psutil.Process()
@@ -296,15 +325,19 @@ class MemoryBuffer:
                 symbol: len(buffer) for symbol, buffer in self._buffers.items() if buffer
             }
 
-            # 计算实际的内存使用率（基于进程内存，不是缓冲大小）
-            process_memory_mb = self._get_memory_usage_mb()
-            memory_usage_percent = (process_memory_mb / self.config.max_size_mb) * 100 if self.config.max_size_mb > 0 else 0
+            # 计算Tick数据缓冲的实际内存使用率
+            buffer_memory_mb = self._get_memory_usage_mb()
+            memory_usage_percent = (buffer_memory_mb / self.config.max_size_mb) * 100 if self.config.max_size_mb > 0 else 0
+
+            # 获取进程内存（用于监控但不用于触发保存）
+            process_memory_mb = self._get_process_memory_mb()
 
             return {
                 **self._memory_stats,
                 'symbol_count': len(symbol_counts),
                 'symbol_ticks': symbol_counts,
                 'memory_usage_percent': memory_usage_percent,
+                'buffer_memory_mb': buffer_memory_mb,
                 'process_memory_mb': process_memory_mb
             }
 
