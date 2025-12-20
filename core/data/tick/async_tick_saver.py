@@ -201,6 +201,7 @@ class AsyncTickSaver:
         """
         # 获取文件路径
         file_path = self._get_file_path(symbol, tick_data_list[0].event_time)
+        logger.info(f"写入路径: {file_path} ，时间{tick_data_list[0].event_time}")
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 转换为DataFrame
@@ -286,6 +287,8 @@ class AsyncTickSaver:
 
         def safe_timestamp_to_datetime(timestamp: int, field_name: str = "", symbol: str = ""):
             """安全的时间戳转换，只在异常时修复"""
+            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}时间戳: {timestamp}")
+
             if timestamp == 0:
                 return pd.NaT  # 返回Not a Time
 
@@ -295,7 +298,7 @@ class AsyncTickSaver:
                 return dt
             except Exception as e:
                 # 转换失败，说明时间戳异常
-                logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}时间戳异常: {timestamp}")
+                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}时间戳异常: {timestamp}")
 
                 # 检查时间戳类型并修复
                 fixed_timestamp = timestamp
@@ -312,7 +315,7 @@ class AsyncTickSaver:
                     fixed_timestamp = timestamp * 1000
                     try:
                         dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
-                        logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换: {timestamp} → {fixed_timestamp} → {dt}")
+                        logger.info(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换: {timestamp} → {fixed_timestamp} → {dt}")
                         return dt
                     except:
                         pass
