@@ -307,12 +307,12 @@ class AsyncTickSaver:
                 # 修复尝试1：如果时间戳过大，尝试除以不同的因子
                 if timestamp > 1e18:  # 可能是纳秒级时间戳
                     fixed_timestamp = timestamp // 1_000_000
-                    logger.info(f"[SAFE_CONVERT] {symbol} {field_name}尝试纳秒转毫秒: {timestamp} → {fixed_timestamp}")
+                    logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}尝试纳秒转毫秒: {timestamp} → {fixed_timestamp}")
                     try:
                         dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
                         if min_timestamp <= fixed_timestamp <= max_timestamp:
                             dt_local = dt.tz_convert('Asia/Shanghai')
-                            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}纳秒转毫秒成功: {dt_local}")
+                            logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}纳秒转毫秒成功: {dt_local}")
                             return dt
                     except:
                         pass
@@ -323,7 +323,7 @@ class AsyncTickSaver:
                         if min_timestamp <= fixed_timestamp <= max_timestamp:
                             try:
                                 dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
-                                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}修复成功(除{divisor}): {timestamp} → {fixed_timestamp} → {dt}")
+                                logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}修复成功(除{divisor}): {timestamp} → {fixed_timestamp} → {dt}")
                                 return dt
                             except:
                                 pass
@@ -335,7 +335,7 @@ class AsyncTickSaver:
                     try:
                         dt = pd.to_datetime(fixed_timestamp, unit='ms', utc=True)
                         if min_timestamp <= fixed_timestamp <= max_timestamp:
-                            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换成功: {timestamp} → {fixed_timestamp} → {dt}")
+                            logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}秒级转换成功: {timestamp} → {fixed_timestamp} → {dt}")
                             return dt
                     except:
                         pass
@@ -352,7 +352,7 @@ class AsyncTickSaver:
                 dt = pd.to_datetime(timestamp, unit='ms', utc=True)
                 # 转换为本地时间显示 (+8小时)
                 dt_local = dt.tz_convert('Asia/Shanghai')
-                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}直接转换成功: {timestamp} → {dt_local}")
+                logger.debug(f"[SAFE_CONVERT] {symbol} {field_name}直接转换成功: {timestamp} → {dt_local}")
                 return dt
             except Exception as e:
                 logger.error(f"[SAFE_CONVERT] {symbol} {field_name}转换失败(时间戳{timestamp}): {e}")
