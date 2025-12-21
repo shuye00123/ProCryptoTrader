@@ -212,25 +212,20 @@ class TickDataConfig:
             # 如果时间戳异常，使用当前时间
             safe_timestamp = timestamp
             if timestamp < min_timestamp or timestamp > max_timestamp:
-                logger.warning(f"[CONFIG_PATH] 异常时间戳: {timestamp}, 使用当前时间: {current_ms}")
                 safe_timestamp = current_ms
 
             # 如果时间戳是秒级而不是毫秒级，转换为毫秒级
             if safe_timestamp < 1e12:
                 safe_timestamp *= 1000
-                logger.info(f"[CONFIG_PATH] 秒级时间戳转换为毫秒级: {timestamp} → {safe_timestamp}")
 
             # 转换为datetime (注意：fromtimestamp期望秒级时间戳)
             dt = datetime.fromtimestamp(safe_timestamp / 1000, tz=timezone.utc)
-            logger.info(f"[CONFIG_PATH] 时间戳转换成功: {safe_timestamp} → {dt}")
 
-        except Exception as e:
-            logger.error(f"[CONFIG_PATH] 时间戳转换失败: {timestamp}, 错误: {e}")
+        except Exception:
             # 使用当前时间作为备选
             import time
             current_ms = int(time.time() * 1000)
             dt = datetime.fromtimestamp(current_ms / 1000, tz=timezone.utc)
-            logger.info(f"[CONFIG_PATH] 使用当前时间: {dt}")
 
         # 构建目录结构: base_path/exchange/symbol/YYYY/MM/DD/
         file_path = (

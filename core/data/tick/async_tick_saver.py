@@ -205,21 +205,9 @@ class AsyncTickSaver:
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 转换为DataFrame
-        logger.info(f"开始转换DataFrame，tick数量: {len(tick_data_list)}")
         df = await self._convert_to_dataframe(tick_data_list)
         if df.empty:
-            logger.info("DataFrame为空，直接返回成功")
             return True
-
-        # 检查DataFrame中的时间戳列
-        logger.info(f"DataFrame转换完成，形状: {df.shape}")
-        if 'event_time' in df.columns:
-            logger.info(f"event_time列数据类型: {df['event_time'].dtype}")
-            logger.info(f"event_time列范围: {df['event_time'].min()} 到 {df['event_time'].max()}")
-        if 'open_time' in df.columns:
-            logger.info(f"open_time列数据类型: {df['open_time'].dtype}")
-            logger.info(f"open_time列范围: {df['open_time'].min()} 到 {df['open_time'].max()}")
-        logger.info(f"所有列数据类型: {df.dtypes.to_dict()}")
 
         # 使用线程池执行实际的文件写入
         loop = asyncio.get_event_loop()
@@ -247,36 +235,19 @@ class AsyncTickSaver:
             temp_path = file_path.with_suffix('.tmp')
             checksum_path = file_path.with_suffix('.json')
 
-            logger.info(f"准备写入Parquet文件: {temp_path}")
-            logger.info(f"DataFrame形状: {df.shape}")
-            logger.info(f"压缩设置: {compression}")
-
-            # 检查是否有任何datetime64列可能有问题
-            datetime_columns = df.select_dtypes(include=['datetime64[ns, UTC]', 'datetime64[ns]']).columns
-            if len(datetime_columns) > 0:
-                logger.info(f"发现datetime列: {list(datetime_columns)}")
-                for col in datetime_columns:
-                    try:
-                        col_min = df[col].min()
-                        col_max = df[col].max()
-                        logger.info(f"列 {col}: 最小值 {col_min}, 最大值 {col_max}")
-
-                        # 检查是否有超出范围的日期
-                        if hasattr(col_min, 'year') and (col_min.year < 1677 or col_max.year > 2262):
-                            logger.error(f"列 {col} 包含超出pandas范围的日期: {col_min.year} - {col_max.year}")
-                    except Exception as e:
-                        logger.error(f"检查列 {col} 时出错: {e}")
+            # 确定压缩设置
+            if self.config.storage.compression == 'none':
+                compression = None
+            else:
+                compression = self.config.storage.compression
 
             # 写入临时文件
-            logger.info("开始写入Parquet文件...")
-            compression = None if self.config.storage.compression == 'none' else self.config.storage.compression
             df.to_parquet(
                 temp_path,
                 engine='pyarrow',
                 compression=compression,
                 index=False
             )
-            logger.info(f"Parquet文件写入成功: {temp_path}")
 
             # 生成校验和
             checksum = self._calculate_checksum(temp_path)
@@ -321,14 +292,10 @@ class AsyncTickSaver:
 
         def safe_timestamp_to_datetime(timestamp: int, field_name: str = "", symbol: str = ""):
             """安全的时间戳转换，处理各种异常时间戳"""
-            logger.info(f"[SAFE_CONVERT] {symbol} {field_name}原始时间戳: {timestamp}")
-
             if timestamp == 0:
-                logger.info(f"[SAFE_CONVERT] {symbol} {field_name}时间戳为0，返回NaT")
                 return pd.NaT  # 返回Not a Time
 
             # 检查时间戳是否在合理范围内
-            current_year = datetime.now().year
             # 允许的时间范围：2000年到2030年
             min_timestamp = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
             max_timestamp = datetime(2030, 12, 31, tzinfo=timezone.utc).timestamp() * 1000
@@ -433,44 +400,34 @@ class AsyncTickSaver:
         """
         def safe_timestamp_for_file_key(timestamp: int) -> int:
             """为文件键生成安全的时间戳"""
-            logger.info(f"[FILE_KEY] 原始时间戳: {timestamp}")
-
             # 检查时间戳合理性范围
-            current_year = datetime.now().year
             min_timestamp = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
             max_timestamp = datetime(2030, 12, 31, tzinfo=timezone.utc).timestamp() * 1000
 
             # 如果时间戳在合理范围内，直接返回
             if min_timestamp <= timestamp <= max_timestamp:
-                logger.info(f"[FILE_KEY] 时间戳正常，直接使用: {timestamp}")
                 return timestamp
-
-            logger.warning(f"[FILE_KEY] 时间戳异常，尝试修复: {timestamp}")
 
             # 修复异常时间戳
             if timestamp > 1e18:  # 可能是纳秒级时间戳
                 fixed_timestamp = timestamp // 1_000_000
                 if min_timestamp <= fixed_timestamp <= max_timestamp:
-                    logger.info(f"[FILE_KEY] 纳秒转毫秒修复成功: {timestamp} → {fixed_timestamp}")
                     return fixed_timestamp
 
             if timestamp > 1e15:  # 可能是微秒级或错误放大的毫秒时间戳
                 for divisor in [1000, 1_000_000, 1_000_000_000]:
                     fixed_timestamp = timestamp // divisor
                     if min_timestamp <= fixed_timestamp <= max_timestamp:
-                        logger.info(f"[FILE_KEY] 除法修复成功(除{divisor}): {timestamp} → {fixed_timestamp}")
                         return fixed_timestamp
 
             elif timestamp < 1e12:  # 可能是秒级时间戳
                 fixed_timestamp = timestamp * 1000
                 if min_timestamp <= fixed_timestamp <= max_timestamp:
-                    logger.info(f"[FILE_KEY] 秒级修复成功: {timestamp} → {fixed_timestamp}")
                     return fixed_timestamp
 
             # 所有修复都失败，使用当前时间
             import time
             current_ms = int(time.time() * 1000)
-            logger.error(f"[FILE_KEY] 修复失败，使用当前时间: {timestamp} → {current_ms}")
             return current_ms
 
         normalized_symbol = symbol.replace('/', '-')
@@ -478,14 +435,11 @@ class AsyncTickSaver:
 
         try:
             dt = datetime.fromtimestamp(safe_timestamp / 1000, tz=timezone.utc)
-            logger.info(f"[FILE_KEY] 时间戳转换成功: {safe_timestamp} → {dt}")
-        except Exception as e:
-            logger.error(f"[FILE_KEY] 时间戳转换失败: {safe_timestamp}, 错误: {e}")
+        except Exception:
             # 使用当前时间作为备选
             import time
             current_ms = int(time.time() * 1000)
             dt = datetime.fromtimestamp(current_ms / 1000, tz=timezone.utc)
-            logger.info(f"[FILE_KEY] 使用当前时间: {dt}")
 
         return f"{normalized_symbol}_{dt.year:04d}{dt.month:02d}{dt.day:02d}{dt.hour:02d}"
 
