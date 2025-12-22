@@ -134,10 +134,18 @@ class TickDataManager:
             if success:
                 self._manager_stats['ticks_collected'] += 1
 
-                # 检查是否需要触发保存（基于内存使用）
+                # 使用新的智能内存检查（防抖 + 更准确的监控）
                 buffer_stats = self.buffer.get_stats()
-                if buffer_stats['memory_usage_percent'] > 80:
-                    logger.info(f"内存使用率高 ({buffer_stats['memory_usage_percent']:.1f}%), 触发保存")
+                cleanup_status = buffer_stats.get('cleanup_status', {})
+
+                if cleanup_status.get('should_save', False):
+                    process_memory_percent = buffer_stats.get('process_memory_percent', 0)
+                    reason = cleanup_status.get('reason', '内存压力')
+
+                    logger.info(f"智能内存告警 - 进程内存: {process_memory_percent:.1f}%, "
+                               f"原因: {reason}, 触发保存")
+
+                    # 异步触发保存，避免阻塞tick收集
                     asyncio.create_task(self._force_save_all())
 
             return success
@@ -274,13 +282,13 @@ class TickDataManager:
     async def _force_save_all(self):
         """强制保存所有数据"""
         try:
-            logger.info("执行强制保存")
+            logger.debug("执行强制保存")
             await self.save_all()
         except Exception as e:
             logger.error(f"强制保存失败: {e}")
 
     async def _health_check(self) -> Dict[str, any]:
-        """执行健康检查
+        """执行增强的健康检查
 
         Returns:
             健康状态信息
@@ -301,14 +309,19 @@ class TickDataManager:
 
             if buffer_health['status'] == 'critical':
                 overall_status = "critical"
-                issues.append(f"内存使用过高: {buffer_health['memory_usage_percent']:.1f}%")
+                issues.append(buffer_health['message'])
             elif buffer_health['status'] == 'warning':
                 overall_status = "warning"
-                issues.append(f"内存使用较高: {buffer_health['memory_usage_percent']:.1f}%")
+                issues.append(buffer_health['message'])
 
             if write_stats.get('success_rate', 100) < 90:
                 overall_status = "critical" if overall_status == "healthy" else overall_status
                 issues.append(f"写入成功率低: {write_stats['success_rate']:.1f}%")
+
+            # 添加防抖状态信息
+            debounce_remaining = buffer_health.get('debounce_remaining', 0)
+            if debounce_remaining > 0:
+                issues.append(f"内存清理冷却中: {debounce_remaining:.0f}秒")
 
             return {
                 'status': overall_status,
@@ -316,7 +329,12 @@ class TickDataManager:
                 'issues': issues,
                 'buffer_health': buffer_health,
                 'write_stats': write_stats,
-                'validation_stats': validation_stats
+                'validation_stats': validation_stats,
+                'memory_summary': {
+                    'process_memory_percent': buffer_health.get('process_memory_percent', 0),
+                    'buffer_memory_percent': buffer_health.get('buffer_memory_percent', 0),
+                    'system_memory_gb': buffer_health.get('system_memory_gb', 0)
+                }
             }
 
         except Exception as e:

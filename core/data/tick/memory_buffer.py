@@ -13,6 +13,7 @@ from typing import Dict, List, Deque, Optional, Set
 import logging
 import psutil
 import gc
+import sys
 
 from ..websocket_client import TickerData
 from .config_models import BufferConfig
@@ -35,21 +36,40 @@ class MemoryBuffer:
             lambda: deque(maxlen=config.max_ticks_per_symbol)
         )
 
-        # 内存使用监控
+        # 改进的内存使用监控
         self._memory_stats = {
             'total_ticks': 0,
             'total_memory_mb': 0.0,
             'last_cleanup_time': 0,
-            'cleanup_count': 0
+            'cleanup_count': 0,
+            'last_save_trigger': 0,  # 最后一次触发保存的时间
+            'save_debounce_cooldown': 30,  # 防抖冷却时间（秒）
         }
 
         # LRU缓存管理
         self._access_times: Dict[str, float] = defaultdict(time.time)
         self._last_access_cleanup = time.time()
 
+        # 获取系统总内存（用于智能阈值调整）
+        try:
+            self.system_memory_gb = psutil.virtual_memory().total / (1024**3)
+            # 针对4GB服务器优化阈值
+            if self.system_memory_gb < 6:
+                self.process_memory_warning_threshold = 70  # 进程内存告警阈值
+                self.process_memory_critical_threshold = 80  # 进程内存危险阈值
+            else:
+                self.process_memory_warning_threshold = 80
+                self.process_memory_critical_threshold = 90
+        except Exception:
+            self.system_memory_gb = 4.0  # 默认值
+            self.process_memory_warning_threshold = 70
+            self.process_memory_critical_threshold = 80
+
         logger.info(f"MemoryBuffer初始化完成 - "
                    f"最大缓冲: {config.max_size_mb}MB, "
-                   f"最大tick数/交易对: {config.max_ticks_per_symbol}")
+                   f"最大tick数/交易对: {config.max_ticks_per_symbol}, "
+                   f"系统内存: {self.system_memory_gb:.1f}GB, "
+                   f"进程内存阈值: {self.process_memory_warning_threshold}%/{self.process_memory_critical_threshold}%")
 
     def add_tick(self, tick_data: TickerData) -> bool:
         """添加tick数据到缓冲区
@@ -62,9 +82,13 @@ class MemoryBuffer:
         """
         try:
             with self._lock:
-                # 检查内存限制
-                if self._should_trigger_cleanup():
-                    self._cleanup_buffers()
+                # 智能内存检查和清理触发
+                cleanup_result = self._check_and_trigger_cleanup()
+                if cleanup_result['should_save']:
+                    # 返回需要外部保存的信号，而不是在add_tick内部触发
+                    self._memory_stats['last_save_trigger'] = time.time()
+                    logger.info(f"内存告警触发 - 进程内存: {cleanup_result['process_memory_percent']:.1f}%, "
+                               f"建议触发保存清理")
 
                 # 添加数据到对应交易对缓冲区
                 symbol = tick_data.symbol
@@ -181,65 +205,198 @@ class MemoryBuffer:
             logger.error(f"清空所有缓冲区失败: {e}")
             return 0
 
-    def _should_trigger_cleanup(self) -> bool:
-        """判断是否应该触发清理
+    def _check_and_trigger_cleanup(self) -> Dict[str, any]:
+        """智能内存检查和清理触发判断
 
         Returns:
-            是否需要清理
+            判断结果字典，包含是否需要保存、清理等信息
         """
-        # 检查内存使用率
-        current_memory_mb = self._get_memory_usage_mb()
-        if current_memory_mb > self.config.max_size_mb * self.config.cleanup_ratio:
-            return True
+        current_time = time.time()
+        result = {
+            'should_save': False,
+            'should_cleanup': False,
+            'process_memory_percent': 0,
+            'buffer_memory_percent': 0,
+            'reason': ''
+        }
 
-        # 检查时间间隔
-        if time.time() - self._memory_stats['last_cleanup_time'] > 300:  # 5分钟
-            return True
+        try:
+            # 获取进程内存使用率（更准确的监控）
+            process_memory_mb = self._get_process_memory_mb()
+            system_memory_mb = psutil.virtual_memory().total / (1024 * 1024)
+            process_memory_percent = (process_memory_mb / system_memory_mb) * 100
+            result['process_memory_percent'] = process_memory_percent
 
-        return False
+            # 获取缓冲区内存使用率
+            buffer_memory_mb = self._get_memory_usage_mb()
+            buffer_memory_percent = (buffer_memory_mb / self.config.max_size_mb) * 100
+            result['buffer_memory_percent'] = buffer_memory_percent
+
+            # 防抖机制检查
+            time_since_last_save = current_time - self._memory_stats['last_save_trigger']
+            if time_since_last_save < self._memory_stats['save_debounce_cooldown']:
+                result['reason'] = f"防抖冷却中 (剩余{self._memory_stats['save_debounce_cooldown'] - time_since_last_save:.0f}秒)"
+                return result
+
+            # 分级判断逻辑
+            # 1. 优先检查进程内存（更准确）
+            if process_memory_percent > self.process_memory_critical_threshold:
+                result['should_save'] = True
+                result['should_cleanup'] = True
+                result['reason'] = f"进程内存危险 ({process_memory_percent:.1f}% > {self.process_memory_critical_threshold}%)"
+                return result
+
+            if process_memory_percent > self.process_memory_warning_threshold:
+                result['should_save'] = True
+                result['reason'] = f"进程内存告警 ({process_memory_percent:.1f}% > {self.process_memory_warning_threshold}%)"
+                return result
+
+            # 2. 检查缓冲区内存（备用指标）
+            if buffer_memory_percent > 85:  # 提高阈值，避免过于敏感
+                result['should_save'] = True
+                result['reason'] = f"缓冲区内存过高 ({buffer_memory_percent:.1f}% > 85%)"
+                return result
+
+            # 3. 时间触发清理（定期维护）
+            if current_time - self._memory_stats['last_cleanup_time'] > 600:  # 10分钟
+                result['should_cleanup'] = True
+                result['reason'] = "定期清理时间到达"
+
+            return result
+
+        except Exception as e:
+            logger.error(f"内存检查失败: {e}")
+            result['reason'] = f"检查失败: {e}"
+            return result
 
     def _cleanup_buffers(self):
-        """清理缓冲区，释放内存"""
+        """智能清理缓冲区，释放内存"""
         try:
             start_time = time.time()
             cleared_count = 0
+            current_time = time.time()
 
             # 获取当前内存使用情况
             current_memory_mb = self._get_memory_usage_mb()
+            process_memory_mb = self._get_process_memory_mb()
 
-            if current_memory_mb > self.config.max_size_mb:
-                # 基于LRU清理最少使用的交易对数据
-                sorted_symbols = sorted(
-                    self._access_times.items(),
-                    key=lambda x: x[1]
-                )
+            logger.debug(f"开始清理 - 缓冲内存: {current_memory_mb:.1f}MB, 进程内存: {process_memory_mb:.1f}MB")
 
-                # 清理最旧的交易对数据，直到内存使用降到目标值
-                target_memory_mb = self.config.max_size_mb * 0.7
-                for symbol, _ in sorted_symbols:
-                    cleared_count += self.clear_symbol(symbol)
-                    current_memory_mb = self._get_memory_usage_mb()
-                    if current_memory_mb <= target_memory_mb:
-                        break
+            # 多层清理策略
+            # 1. 清理过期的tick数据（基于时间）
+            cleared_time_data = self._cleanup_expired_ticks()
+            cleared_count += cleared_time_data
 
-            # 清理过期的访问时间记录
+            # 2. 如果还需要更多清理，基于LRU清理
+            if current_memory_mb > self.config.max_size_mb * 0.8:
+                cleared_lru_data = self._cleanup_by_lru()
+                cleared_count += cleared_lru_data
+
+            # 3. 清理过期的访问时间记录
             self._cleanup_access_times()
 
+            # 4. 强制垃圾回收
+            if cleared_count > 0:
+                gc.collect()
+
             # 更新统计信息
-            self._memory_stats['last_cleanup_time'] = time.time()
+            self._memory_stats['last_cleanup_time'] = current_time
             self._memory_stats['cleanup_count'] += 1
             self._update_memory_stats()
 
             cleanup_time = time.time() - start_time
-            buffer_memory_mb = self._get_memory_usage_mb()
-            process_memory_mb = self._get_process_memory_mb()
-            logger.info(f"缓冲区清理完成 - 耗时: {cleanup_time:.3f}s, "
+            final_buffer_memory = self._get_memory_usage_mb()
+            final_process_memory = self._get_process_memory_mb()
+
+            logger.info(f"智能缓冲区清理完成 - 耗时: {cleanup_time:.3f}s, "
                        f"清除: {cleared_count}条数据, "
-                       f"Tick缓冲内存: {buffer_memory_mb:.1f}MB, "
-                       f"进程总内存: {process_memory_mb:.1f}MB")
+                       f"缓冲内存: {current_memory_mb:.1f}MB → {final_buffer_memory:.1f}MB, "
+                       f"进程内存: {process_memory_mb:.1f}MB → {final_process_memory:.1f}MB")
 
         except Exception as e:
             logger.error(f"缓冲区清理失败: {e}")
+
+    def _cleanup_expired_ticks(self) -> int:
+        """清理过期的tick数据（基于时间）"""
+        try:
+            cleared_count = 0
+            current_time = time.time()
+            expiry_threshold = 300  # 5分钟前的数据认为是过期的
+
+            for symbol, buffer in list(self._buffers.items()):
+                if not buffer:
+                    continue
+
+                # 获取最早的数据时间
+                oldest_tick_time = None
+                for tick in buffer:
+                    if hasattr(tick, 'event_time') and tick.event_time:
+                        oldest_tick_time = tick.event_time / 1000  # 转换为秒
+                        break
+
+                # 如果数据过期，清理前50%
+                if oldest_tick_time and (current_time - oldest_tick_time) > expiry_threshold:
+                    original_count = len(buffer)
+                    # 只清理前50%的数据，保留较新的数据
+                    remove_count = min(len(buffer), max(1, len(buffer) // 2))
+
+                    for _ in range(remove_count):
+                        if buffer:
+                            buffer.popleft()
+                            cleared_count += 1
+
+                    self._memory_stats['total_ticks'] -= cleared_count
+                    logger.debug(f"清理过期数据 {symbol}: {remove_count} 条")
+
+            return cleared_count
+
+        except Exception as e:
+            logger.error(f"清理过期tick失败: {e}")
+            return 0
+
+    def _cleanup_by_lru(self) -> int:
+        """基于LRU清理最少使用的交易对数据"""
+        try:
+            cleared_count = 0
+
+            # 按访问时间排序，清理最久未访问的交易对
+            sorted_symbols = sorted(
+                self._access_times.items(),
+                key=lambda x: x[1]
+            )
+
+            current_memory_mb = self._get_memory_usage_mb()
+            target_memory_mb = self.config.max_size_mb * 0.6  # 目标降到60%
+
+            for symbol, last_access in sorted_symbols:
+                if current_memory_mb <= target_memory_mb:
+                    break
+
+                # 保留最近访问的交易对，跳过30秒内有活动的
+                if time.time() - last_access < 30:
+                    continue
+
+                # 清理该交易对的一部分数据而不是全部
+                buffer = self._buffers.get(symbol, deque())
+                if buffer:
+                    original_count = len(buffer)
+                    # 清理75%的数据，保留25%
+                    remove_count = max(1, int(original_count * 0.75))
+
+                    for _ in range(remove_count):
+                        if buffer:
+                            buffer.popleft()
+                            cleared_count += 1
+
+                    self._memory_stats['total_ticks'] -= cleared_count
+                    current_memory_mb = self._get_memory_usage_mb()
+                    logger.debug(f"LRU清理 {symbol}: {remove_count} 条，剩余 {len(buffer)} 条")
+
+            return cleared_count
+
+        except Exception as e:
+            logger.error(f"LRU清理失败: {e}")
+            return 0
 
     def _cleanup_access_times(self):
         """清理过期的访问时间记录"""
@@ -313,7 +470,7 @@ class MemoryBuffer:
             logger.error(f"更新内存统计失败: {e}")
 
     def get_stats(self) -> Dict[str, any]:
-        """获取缓冲区统计信息
+        """获取增强的缓冲区统计信息
 
         Returns:
             统计信息字典
@@ -327,18 +484,40 @@ class MemoryBuffer:
 
             # 计算Tick数据缓冲的实际内存使用率
             buffer_memory_mb = self._get_memory_usage_mb()
-            memory_usage_percent = (buffer_memory_mb / self.config.max_size_mb) * 100 if self.config.max_size_mb > 0 else 0
+            buffer_memory_percent = (buffer_memory_mb / self.config.max_size_mb) * 100 if self.config.max_size_mb > 0 else 0
 
-            # 获取进程内存（用于监控但不用于触发保存）
+            # 获取进程内存和系统内存（主要监控指标）
             process_memory_mb = self._get_process_memory_mb()
+            system_memory_mb = psutil.virtual_memory().total / (1024 * 1024)
+            process_memory_percent = (process_memory_mb / system_memory_mb) * 100
+
+            # 获取内存检查结果
+            cleanup_result = self._check_and_trigger_cleanup()
 
             return {
                 **self._memory_stats,
                 'symbol_count': len(symbol_counts),
                 'symbol_ticks': symbol_counts,
-                'memory_usage_percent': memory_usage_percent,
+
+                # 内存使用信息
                 'buffer_memory_mb': buffer_memory_mb,
-                'process_memory_mb': process_memory_mb
+                'buffer_memory_percent': buffer_memory_percent,
+                'process_memory_mb': process_memory_mb,
+                'process_memory_percent': process_memory_percent,
+                'system_memory_gb': self.system_memory_gb,
+
+                # 阈值信息
+                'process_memory_warning_threshold': self.process_memory_warning_threshold,
+                'process_memory_critical_threshold': self.process_memory_critical_threshold,
+
+                # 清理状态
+                'cleanup_status': {
+                    'should_save': cleanup_result['should_save'],
+                    'should_cleanup': cleanup_result['should_cleanup'],
+                    'reason': cleanup_result['reason'],
+                    'debounce_remaining': max(0, self._memory_stats['save_debounce_cooldown'] -
+                                             (time.time() - self._memory_stats['last_save_trigger']))
+                }
             }
 
     def get_buffer_status(self, symbol: str) -> Dict[str, any]:
@@ -378,22 +557,26 @@ class MemoryBuffer:
             }
 
     def health_check(self) -> Dict[str, any]:
-        """健康检查
+        """增强的健康检查
 
         Returns:
             健康状态信息
         """
         try:
             stats = self.get_stats()
-            memory_usage_percent = stats.get('memory_usage_percent', 0)
+            process_memory_percent = stats.get('process_memory_percent', 0)
+            buffer_memory_percent = stats.get('buffer_memory_percent', 0)
 
-            # 判断健康状态
-            if memory_usage_percent > 90:
+            # 基于进程内存判断健康状态（更准确）
+            if process_memory_percent > stats.get('process_memory_critical_threshold', 80):
                 status = "critical"
-                message = "内存使用率过高，需要立即清理"
-            elif memory_usage_percent > 80:
+                message = f"进程内存危险 ({process_memory_percent:.1f}%)，需要立即清理"
+            elif process_memory_percent > stats.get('process_memory_warning_threshold', 70):
                 status = "warning"
-                message = "内存使用率较高，建议清理"
+                message = f"进程内存告警 ({process_memory_percent:.1f}%)，建议清理"
+            elif buffer_memory_percent > 85:
+                status = "warning"
+                message = f"缓冲区内存较高 ({buffer_memory_percent:.1f}%)"
             else:
                 status = "healthy"
                 message = "运行正常"
@@ -401,18 +584,30 @@ class MemoryBuffer:
             return {
                 'status': status,
                 'message': message,
-                'memory_usage_percent': memory_usage_percent,
+
+                # 内存信息
+                'process_memory_percent': process_memory_percent,
+                'buffer_memory_percent': buffer_memory_percent,
+                'process_memory_mb': stats.get('process_memory_mb', 0),
+                'buffer_memory_mb': stats.get('buffer_memory_mb', 0),
+
+                # 基本信息
                 'total_ticks': stats.get('total_ticks', 0),
                 'symbol_count': stats.get('symbol_count', 0),
                 'cleanup_count': stats.get('cleanup_count', 0),
-                'last_cleanup_time': stats.get('last_cleanup_time', 0)
+                'last_cleanup_time': stats.get('last_cleanup_time', 0),
+
+                # 系统信息
+                'system_memory_gb': stats.get('system_memory_gb', 0),
+                'debounce_remaining': stats.get('cleanup_status', {}).get('debounce_remaining', 0)
             }
 
         except Exception as e:
             return {
                 'status': 'error',
                 'message': f'健康检查失败: {e}',
-                'memory_usage_percent': 0,
+                'process_memory_percent': 0,
+                'buffer_memory_percent': 0,
                 'total_ticks': 0,
                 'symbol_count': 0,
                 'cleanup_count': 0,

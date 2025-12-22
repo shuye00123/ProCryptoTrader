@@ -201,7 +201,7 @@ class AsyncTickSaver:
         """
         # 获取文件路径
         file_path = self._get_file_path(symbol, tick_data_list[0].event_time)
-        logger.info(f"写入路径: {file_path} ，时间{tick_data_list[0].event_time}")
+        logger.debug(f"写入路径: {file_path} ，时间{tick_data_list[0].event_time}")
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 转换为DataFrame
