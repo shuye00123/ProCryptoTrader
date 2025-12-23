@@ -12,13 +12,13 @@ basic:
   start_date: "2024-01-01"     # 回测开始日期
   end_date: "2025-09-30"       # 回测结束日期
   initial_balance: 10000      # 初始资金
-  benchmark: "BTC/USDT"        # 基准标的
+  benchmark: "BNB/USDT"        # 基准标的
 
 # 数据设置
 data:
   exchange: "binance"          # 交易所
   symbols:
-    - "BTC/USDT"              # 交易对
+    - "BNB/USDT"              # 交易对
   timeframes:
     - "15m"                   # 时间框架
   data_dir: "./data"          # 数据目录
@@ -34,9 +34,9 @@ strategy:
     max_positions: 1              # 最大持仓数量 (传统网格通常只同时持仓一个方向)
 
     # 固定价格边界
-    absolute_upper_price: 120000.0  # 固定上限价格
-    absolute_lower_price: 30000.0  # 固定下限价格
-    base_price: 45000.0            # 固定基准价格 (在边界之间)
+    absolute_upper_price: 1200.0  # 固定上限价格
+    absolute_lower_price: 300.0  # 固定下限价格
+    base_price: 600.0            # 固定基准价格 (在边界之间)
 
     # 风险控制
     stop_loss_pct: 0.10          # 止损 10%

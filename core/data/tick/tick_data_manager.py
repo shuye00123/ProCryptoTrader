@@ -225,28 +225,63 @@ class TickDataManager:
             return {}
 
     async def _periodic_save_task(self):
-        """定期保存任务"""
-        logger.info("启动定期保存任务")
+        """自适应保存任务 - 根据内存压力和数据量动态调整保存频率
+
+        优化策略:
+        - 内存使用率 > 80%: 立即触发保存，间隔缩短至30秒
+        - 数据增长快 (>5000 tick): 提前触发保存，间隔60秒
+        - 正常情况: 使用配置的默认间隔
+        """
+        logger.info("启动自适应保存任务")
+
+        last_total_ticks = 0
+        # 动态保存间隔，初始值为配置的默认值
+        save_interval = self.config.save_interval_seconds
 
         while self._running:
             try:
-                # 等待保存间隔
-                await asyncio.sleep(self.config.save_interval_seconds)
+                await asyncio.sleep(save_interval)
 
                 if not self._running:
                     break
 
-                # 执行定期保存
-                logger.debug("执行定期保存")
-                await self.save_all()
+                # 获取当前缓冲区状态
+                current_stats = self.buffer.get_stats()
+                total_ticks = current_stats.get('total_ticks', 0)
+                memory_percent = current_stats.get('process_memory_percent', 0)
+                tick_growth = total_ticks - last_total_ticks
+
+                # 动态调整保存策略
+                if memory_percent > 80:
+                    # 内存告警 - 立即保存，缩短间隔
+                    logger.warning(f"内存压力 {memory_percent:.1f}%，触发紧急保存")
+                    await self.save_all()
+                    save_interval = 30  # 加快保存频率
+                    last_total_ticks = total_ticks
+
+                elif tick_growth > 5000:
+                    # 数据量增长快 - 提前保存
+                    logger.info(f"数据增长快 (+{tick_growth} ticks)，触发提前保存")
+                    await self.save_all()
+                    save_interval = 60  # 使用较短间隔
+                    last_total_ticks = total_ticks
+
+                else:
+                    # 正常情况 - 定期保存
+                    logger.debug(f"执行定期保存 (总tick: {total_ticks})")
+                    await self.save_all()
+                    save_interval = self.config.save_interval_seconds  # 恢复默认间隔
+                    last_total_ticks = total_ticks
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"定期保存任务错误: {e}")
+                logger.error(f"自适应保存任务错误: {e}")
                 # 继续运行，不要因为单次错误而停止
+                # 发生错误时恢复默认间隔
+                save_interval = self.config.save_interval_seconds
 
-        logger.info("定期保存任务已停止")
+        logger.info("自适应保存任务已停止")
 
     async def _monitor_task_func(self):
         """监控任务"""
