@@ -39,6 +39,11 @@ class TickDataManager:
         self.saver = AsyncTickSaver(config)
         self.integrity_manager = DataIntegrityManager(config)
 
+        # V2.0: 保存队列机制 - 无损排队
+        self._save_queue = None  # asyncio.Queue，在start中创建
+        self._save_worker_task = None
+        self._max_queue_size = 100  # 队列最大长度
+
         # 管理统计
         self._manager_stats = {
             'start_time': 0,
@@ -46,13 +51,15 @@ class TickDataManager:
             'ticks_saved': 0,
             'save_cycles': 0,
             'last_save_time': 0,
-            'total_runtime': 0
+            'total_runtime': 0,
+            'queue_max_size': 0,  # 队列最大长度统计
+            'queue_dropped': 0     # 队列丢弃计数
         }
 
         # 控制锁
         self._manager_lock = threading.RLock()
 
-        logger.info(f"TickDataManager初始化完成 - "
+        logger.info(f"TickDataManager初始化完成 (V2.0队列模式) - "
                    f"转存间隔: {config.save_interval_seconds}秒, "
                    f"存储路径: {config.storage.base_path}")
 
@@ -65,18 +72,24 @@ class TickDataManager:
         self._running = True
         self._manager_stats['start_time'] = time.time()
 
+        # V2.0: 创建保存队列
+        self._save_queue = asyncio.Queue(maxsize=self._max_queue_size)
+
         # 创建存储目录
         storage_path = Path(self.config.storage.base_path)
         storage_path.mkdir(parents=True, exist_ok=True)
 
-        # 启动定期转存任务
+        # V2.0: 启动保存工作协程（串行处理保存请求）
+        self._save_worker_task = asyncio.create_task(self._save_worker())
+
+        # 启动定期转存任务（只负责入队）
         self._save_task = asyncio.create_task(self._periodic_save_task())
 
         # 启动监控任务（如果启用）
         if self.config.monitoring.enable_metrics:
             self._monitor_task = asyncio.create_task(self._monitor_task_func())
 
-        logger.info("TickDataManager已启动")
+        logger.info("TickDataManager已启动 (V2.0队列模式)")
 
     async def stop(self):
         """停止tick数据管理器"""
@@ -86,6 +99,12 @@ class TickDataManager:
         logger.info("正在停止TickDataManager...")
 
         self._running = False
+
+        # V2.0: 等待队列中所有任务完成
+        if self._save_queue and not self._save_queue.empty():
+            queue_size = self._save_queue.qsize()
+            logger.info(f"等待队列中 {queue_size} 个保存任务完成...")
+            await self._save_queue.join()
 
         # 取消任务
         if self._save_task and not self._save_task.done():
@@ -102,8 +121,16 @@ class TickDataManager:
             except asyncio.CancelledError:
                 pass
 
-        # 执行最后一次保存
-        await self._force_save_all()
+        # V2.0: 取消保存工作协程
+        if self._save_worker_task and not self._save_worker_task.done():
+            self._save_worker_task.cancel()
+            try:
+                await self._save_worker_task
+            except asyncio.CancelledError:
+                pass
+
+        # 执行最后一次保存（确保所有数据落盘）
+        await self._do_save_all()
 
         # 清理资源
         await self.saver.cleanup()
@@ -134,7 +161,7 @@ class TickDataManager:
             if success:
                 self._manager_stats['ticks_collected'] += 1
 
-                # 使用新的智能内存检查（防抖 + 更准确的监控）
+                # V2.0: 智能内存检查后入队（而非直接创建任务）
                 buffer_stats = self.buffer.get_stats()
                 cleanup_status = buffer_stats.get('cleanup_status', {})
 
@@ -143,10 +170,10 @@ class TickDataManager:
                     reason = cleanup_status.get('reason', '内存压力')
 
                     logger.info(f"智能内存告警 - 进程内存: {process_memory_percent:.1f}%, "
-                               f"原因: {reason}, 触发保存")
+                               f"原因: {reason}, 触发保存入队")
 
-                    # 异步触发保存，避免阻塞tick收集
-                    asyncio.create_task(self._force_save_all())
+                    # V2.0: 入队而非直接创建任务
+                    await self._enqueue_save_request()
 
             return success
 
@@ -225,63 +252,31 @@ class TickDataManager:
             return {}
 
     async def _periodic_save_task(self):
-        """自适应保存任务 - 根据内存压力和数据量动态调整保存频率
+        """定期保存任务 - V2.0: 只负责入队，不直接执行保存
 
-        优化策略:
-        - 内存使用率 > 80%: 立即触发保存，间隔缩短至30秒
-        - 数据增长快 (>5000 tick): 提前触发保存，间隔60秒
-        - 正常情况: 使用配置的默认间隔
+        工作流程：
+        1. 等待指定间隔
+        2. 将保存请求放入队列
+        3. 工作协程负责实际保存操作
         """
-        logger.info("启动自适应保存任务")
-
-        last_total_ticks = 0
-        # 动态保存间隔，初始值为配置的默认值
-        save_interval = self.config.save_interval_seconds
+        logger.info("启动定期保存任务 (V2.0队列模式)")
 
         while self._running:
             try:
-                await asyncio.sleep(save_interval)
+                await asyncio.sleep(self.config.save_interval_seconds)
 
                 if not self._running:
                     break
 
-                # 获取当前缓冲区状态
-                current_stats = self.buffer.get_stats()
-                total_ticks = current_stats.get('total_ticks', 0)
-                memory_percent = current_stats.get('process_memory_percent', 0)
-                tick_growth = total_ticks - last_total_ticks
-
-                # 动态调整保存策略
-                if memory_percent > 80:
-                    # 内存告警 - 立即保存，缩短间隔
-                    logger.warning(f"内存压力 {memory_percent:.1f}%，触发紧急保存")
-                    await self.save_all()
-                    save_interval = 30  # 加快保存频率
-                    last_total_ticks = total_ticks
-
-                elif tick_growth > 5000:
-                    # 数据量增长快 - 提前保存
-                    logger.info(f"数据增长快 (+{tick_growth} ticks)，触发提前保存")
-                    await self.save_all()
-                    save_interval = 60  # 使用较短间隔
-                    last_total_ticks = total_ticks
-
-                else:
-                    # 正常情况 - 定期保存
-                    logger.debug(f"执行定期保存 (总tick: {total_ticks})")
-                    await self.save_all()
-                    save_interval = self.config.save_interval_seconds  # 恢复默认间隔
-                    last_total_ticks = total_ticks
+                # V2.0: 只入队，不阻塞
+                await self._enqueue_save_request()
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"自适应保存任务错误: {e}")
-                # 继续运行，不要因为单次错误而停止
-                # 发生错误时恢复默认间隔
-                save_interval = self.config.save_interval_seconds
+                logger.error(f"定期保存任务错误: {e}")
 
-        logger.info("自适应保存任务已停止")
+        logger.info("定期保存任务已停止")
 
     async def _monitor_task_func(self):
         """监控任务"""
@@ -315,12 +310,60 @@ class TickDataManager:
         logger.info("监控任务已停止")
 
     async def _force_save_all(self):
-        """强制保存所有数据"""
+        """强制保存所有数据 - V2.0: 入队而非直接执行"""
+        await self._enqueue_save_request()
+
+    async def _enqueue_save_request(self):
+        """将保存请求放入队列 - V2.0新方法"""
+        if self._save_queue is None:
+            logger.warning("保存队列未初始化，直接执行保存")
+            await self._do_save_all()
+            return
+
         try:
-            logger.debug("执行强制保存")
+            # 非阻塞入队
+            self._save_queue.put_nowait('save')
+            queue_size = self._save_queue.qsize()
+
+            # 更新统计
+            if queue_size > self._manager_stats['queue_max_size']:
+                self._manager_stats['queue_max_size'] = queue_size
+
+            logger.debug(f"保存请求已入队，当前队列长度: {queue_size}")
+
+        except asyncio.QueueFull:
+            self._manager_stats['queue_dropped'] += 1
+            logger.warning(f"保存队列已满，跳过本次请求 (已丢弃: {self._manager_stats['queue_dropped']})")
+
+    async def _save_worker(self):
+        """保存工作协程 - V2.0新方法: 持续处理队列中的保存请求"""
+        logger.info("保存工作协程已启动")
+
+        while self._running:
+            try:
+                # 等待队列中的保存请求
+                await self._save_queue.get()
+
+                # 执行保存
+                await self._do_save_all()
+
+                # 标记任务完成
+                self._save_queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"保存工作协程异常: {e}")
+
+        logger.info("保存工作协程已停止")
+
+    async def _do_save_all(self):
+        """实际执行保存操作 - V2.0新方法"""
+        try:
+            logger.debug("执行保存操作")
             await self.save_all()
         except Exception as e:
-            logger.error(f"强制保存失败: {e}")
+            logger.error(f"保存操作失败: {e}")
 
     async def _health_check(self) -> Dict[str, any]:
         """执行增强的健康检查

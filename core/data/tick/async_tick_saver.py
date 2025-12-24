@@ -37,17 +37,12 @@ class AsyncTickSaver:
         self.config = config
         self.performance_config = config.performance
 
-        # 并发控制 - 信号量控制并发写入数量
-        self._write_semaphore = asyncio.Semaphore(
-            self.performance_config.max_concurrent_writes
-        )
+        # V2.0: 并发控制 - 改为串行写入避免资源竞争
+        # 从配置的 max_concurrent_writes 改为固定为 1
+        self._write_semaphore = asyncio.Semaphore(1)
 
-        # 线程池用于CPU密集型操作
-        # 优化: 线程池大小应为信号量的2倍，避免死锁
-        # 原因: 每个并发写入任务可能在线程池中执行，如果线程池太小会阻塞
-        self._executor = ThreadPoolExecutor(
-            max_workers=min(8, self.performance_config.max_concurrent_writes * 2)
-        )
+        # V2.0: 线程池保持较小规模，仅用于单任务内的并行操作
+        self._executor = ThreadPoolExecutor(max_workers=2)
 
         # 写入统计
         self._write_stats = {
@@ -68,8 +63,8 @@ class AsyncTickSaver:
         self._active_writes: Set[str] = set()
         self._write_locks: Dict[str, asyncio.Lock] = {}
 
-        logger.info(f"AsyncTickSaver初始化完成 - "
-                   f"最大并发写入: {self.performance_config.max_concurrent_writes}, "
+        logger.info(f"AsyncTickSaver初始化完成 (V2.0串行模式) - "
+                   f"串行写入, "
                    f"批量大小: {self.performance_config.batch_size}, "
                    f"压缩: {config.storage.compression}")
 
@@ -282,12 +277,12 @@ class AsyncTickSaver:
             return False
 
     async def _convert_to_dataframe(self, tick_data_list: List[TickerData]) -> pd.DataFrame:
-        """转换tick数据列表为DataFrame - 内存优化版本
+        """转换tick数据列表为DataFrame - V2.0优化版本
 
-        优化点:
-        - 预分配NumPy数组避免临时对象
-        - 批量转换减少内存分配次数
-        - 减少约30-40%的转换过程内存占用
+        优化策略:
+        - 移除NumPy数组预分配，改用字典列表
+        - 让pandas自然推断类型，减少临时对象
+        - 降低转换过程的内存占用
 
         Args:
             tick_data_list: tick数据列表
@@ -298,75 +293,34 @@ class AsyncTickSaver:
         if not tick_data_list:
             return pd.DataFrame()
 
-        n = len(tick_data_list)
-
-        # 预分配NumPy数组，避免创建大量临时字典对象
-        symbols = np.empty(n, dtype='U16')
-        prices = np.empty(n, dtype='f8')
-        price_changes = np.empty(n, dtype='f8')
-        price_change_percents = np.empty(n, dtype='f8')
-        weighted_avg_prices = np.empty(n, dtype='f8')
-        open_prices = np.empty(n, dtype='f8')
-        high_prices = np.empty(n, dtype='f8')
-        low_prices = np.empty(n, dtype='f8')
-        volumes = np.empty(n, dtype='f8')
-        quote_volumes = np.empty(n, dtype='f8')
-        first_ids = np.empty(n, dtype='i8')
-        last_ids = np.empty(n, dtype='i8')
-        counts = np.empty(n, dtype='i8')
-        last_quantities = np.empty(n, dtype='f8')
-
-        # 时间字段列表
-        open_times = []
-        close_times = []
-        event_times = []
-
-        # 批量提取数据（向量化操作）
-        for i, tick in enumerate(tick_data_list):
-            symbols[i] = tick.symbol
-            prices[i] = float(tick.price)
-            price_changes[i] = float(tick.price_change)
-            price_change_percents[i] = float(tick.price_change_percent)
-            weighted_avg_prices[i] = float(tick.weighted_avg_price)
-            open_prices[i] = float(tick.open_price)
-            high_prices[i] = float(tick.high_price)
-            low_prices[i] = float(tick.low_price)
-            volumes[i] = float(tick.volume)
-            quote_volumes[i] = float(tick.quote_volume)
-            first_ids[i] = int(tick.first_id)
-            last_ids[i] = int(tick.last_id)
-            counts[i] = int(tick.count)
-            last_quantities[i] = float(tick.last_quantity)
-
-            # 时间字段使用安全转换函数处理
-            open_times.append(self._safe_timestamp_to_datetime(tick.open_time, "open_time", tick.symbol))
-            close_times.append(self._safe_timestamp_to_datetime(tick.close_time, "close_time", tick.symbol))
-            event_times.append(self._safe_timestamp_to_datetime(tick.event_time, "event_time", tick.symbol))
-
-        # 创建created_at数组（统一时间）
+        # V2.0: 使用字典列表方式，让pandas自然推断类型
+        # 避免预分配19个NumPy数组的内存开销
+        data_dicts = []
         created_at = datetime.now(timezone.utc)
 
-        # 直接创建DataFrame，避免中间dict列表
-        return pd.DataFrame({
-            'symbol': symbols,
-            'price': prices,
-            'price_change': price_changes,
-            'price_change_percent': price_change_percents,
-            'weighted_avg_price': weighted_avg_prices,
-            'open_price': open_prices,
-            'high_price': high_prices,
-            'low_price': low_prices,
-            'volume': volumes,
-            'quote_volume': quote_volumes,
-            'open_time': open_times,
-            'close_time': close_times,
-            'event_time': event_times,
-            'first_id': first_ids,
-            'last_id': last_ids,
-            'count': counts,
-            'last_quantity': last_quantities,
-            'created_at': [created_at] * n  # 统一创建时间
-        })
+        for tick in tick_data_list:
+            data_dicts.append({
+                'symbol': tick.symbol,
+                'price': tick.price,
+                'price_change': tick.price_change,
+                'price_change_percent': tick.price_change_percent,
+                'weighted_avg_price': tick.weighted_avg_price,
+                'open_price': tick.open_price,
+                'high_price': tick.high_price,
+                'low_price': tick.low_price,
+                'volume': tick.volume,
+                'quote_volume': tick.quote_volume,
+                'open_time': self._safe_timestamp_to_datetime(tick.open_time, "open_time", tick.symbol),
+                'close_time': self._safe_timestamp_to_datetime(tick.close_time, "close_time", tick.symbol),
+                'event_time': self._safe_timestamp_to_datetime(tick.event_time, "event_time", tick.symbol),
+                'first_id': tick.first_id,
+                'last_id': tick.last_id,
+                'count': tick.count,
+                'last_quantity': tick.last_quantity,
+                'created_at': created_at
+            })
+
+        return pd.DataFrame(data_dicts)
 
     def _safe_timestamp_to_datetime(self, timestamp: int, field_name: str = "", symbol: str = ""):
         """安全的时间戳转换，处理各种异常时间戳（内部方法）"""

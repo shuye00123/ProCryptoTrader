@@ -46,6 +46,10 @@ class MemoryBuffer:
             'save_debounce_cooldown': 30,  # 防抖冷却时间（秒）
         }
 
+        # V2.0: 内存检查节流 - 避免每次add_tick都调用psutil
+        self._last_memory_check = 0
+        self._memory_check_interval = 10  # 每10秒检查一次内存
+
         # LRU缓存管理
         self._access_times: Dict[str, float] = defaultdict(time.time)
         self._last_access_cleanup = time.time()
@@ -82,26 +86,35 @@ class MemoryBuffer:
         """
         try:
             with self._lock:
-                # 智能内存检查和清理触发
-                cleanup_result = self._check_and_trigger_cleanup()
-                if cleanup_result['should_save']:
-                    # 返回需要外部保存的信号，而不是在add_tick内部触发
-                    self._memory_stats['last_save_trigger'] = time.time()
-                    logger.info(f"内存告警触发 - 进程内存: {cleanup_result['process_memory_percent']:.1f}%, "
-                               f"建议触发保存清理")
+                # V2.0: 节流内存检查 - 只在间隔时间后检查
+                current_time = time.time()
+                should_check_memory = (
+                    current_time - self._last_memory_check >= self._memory_check_interval
+                )
+
+                cleanup_result = None
+                if should_check_memory:
+                    self._last_memory_check = current_time
+                    # 智能内存检查和清理触发
+                    cleanup_result = self._check_and_trigger_cleanup()
+                    if cleanup_result['should_save']:
+                        # 返回需要外部保存的信号，而不是在add_tick内部触发
+                        self._memory_stats['last_save_trigger'] = current_time
+                        logger.info(f"内存告警触发 - 进程内存: {cleanup_result['process_memory_percent']:.1f}%, "
+                                   f"建议触发保存清理")
 
                 # 添加数据到对应交易对缓冲区
                 symbol = tick_data.symbol
                 self._buffers[symbol].append(tick_data)
 
                 # 更新访问时间
-                self._access_times[symbol] = time.time()
+                self._access_times[symbol] = current_time
 
                 # 更新统计信息
                 self._memory_stats['total_ticks'] += 1
 
                 # 定期更新内存使用统计
-                if time.time() - self._memory_stats['last_cleanup_time'] > 10:
+                if current_time - self._memory_stats['last_cleanup_time'] > 10:
                     self._update_memory_stats()
 
             return True

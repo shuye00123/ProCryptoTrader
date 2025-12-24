@@ -272,11 +272,11 @@ notifications:
     - "risk_limit_hit"
     - "system_error"
 
-# Tick数据转存配置
+# Tick数据转存配置 - V2.0优化版 (更大批次+更低频率+队列机制)
 tick_data_persistence:
   # 基础配置
   enabled: true                    # 是否启用转存功能
-  save_interval_seconds: 60        # 转存间隔(1分钟) - 优化: 更频繁保存降低内存峰值
+  save_interval_seconds: 300       # 转存间隔(5分钟) - V2.0: 降低频率减少任务创建
 
   # 存储配置
   storage:
@@ -287,15 +287,15 @@ tick_data_persistence:
 
   # 内存缓冲配置
   buffer:
-    max_size_mb: 30               # 最大缓冲大小(MB) - 优化: 降低防止内存耗尽
-    max_ticks_per_symbol: 10000    # 每个交易对最大tick数 - 优化: 减少单次保存量
-    cleanup_ratio: 0.7             # 清理阈值 - 优化: 更激进清理
+    max_size_mb: 150              # 最大缓冲大小(MB) - V2.0: 增大缓冲区
+    max_ticks_per_symbol: 50000    # 每个交易对最大tick数 - V2.0: 恢复到50000
+    cleanup_ratio: 0.8             # 清理阈值 - V2.0: 恢复到0.8
 
   # 性能配置
   performance:
-    batch_size: 100               # 批量写入大小 - 优化: 减少单次写入量
-    max_concurrent_writes: 2      # 最大并发写入数 - 优化: 降低内存峰值
-    write_timeout_seconds: 60     # 写入超时时间 - 优化: 增加超时时间
+    batch_size: 5000              # 批量写入大小 - V2.0: 增大减少DataFrame转换次数
+    max_concurrent_writes: 1      # 最大并发写入数 - V2.0: 串行化避免资源竞争
+    write_timeout_seconds: 120    # 写入超时时间 - V2.0: 增加到120秒
 
   # 数据质量配置
   integrity:
