@@ -38,72 +38,72 @@ strategy:
   max_total_exposure: 0.15  # 最大总暴露 (15%)
   signal_cooldown: 30  # 信号冷却时间 (秒)
 
-  # Tick级别突破检测配置 - 严格优化版
+  # Tick级别突破检测配置 - 🔧 保守配置：捕捉爆发性突破（每天几次）
   tick_breakout:
     enabled: true  # 启用Tick级别突破检测
-    window_size: 200  # Tick数据窗口大小 (从200增加到500)
-    min_breakout_strength: 2.0  # 最小突破强度 (从3.0提高到5.0)
-    volume_threshold: 1.3  # 🔧 优化：成交量阈值降低 (从1.8到1.3，提高触发率)
-    consecutive_moves_threshold: 5  # 连续变动阈值 (从5增加到8)
-    breakout_cooldown: 3000  # 突破冷却期 (从5秒增加到10秒)
+    window_size: 200  # 200个tick窗口用于统计分析
+    min_breakout_strength: 2.0  # 2%价格变动才触发（捕捉爆发性突破）
+    volume_threshold: 1.5  # 成交量阈值
+    consecutive_moves_threshold: 5  # 连续变动5次
+    breakout_cooldown: 3000  # 3秒冷却期
 
     # 多重确认机制
-    require_multiple_confirmation: true  # 🔧 关闭：确保单算法能产生信号
-    min_confirmation_count: 2            # 🔧 降低：只需要1个确认
-    confirmation_window: 5000           # 🔧 增加：更长的确认窗口
+    require_multiple_confirmation: false  # 关闭：单算法也能产生信号
+    min_confirmation_count: 1  # 只需要1个确认
+    confirmation_window: 2000  # 2秒确认窗口
 
-    # 🔥 方向协调机制
+    # 🔥 方向协调机制 - 🔧 调整为宽松模式，允许爆发性突破通过
     direction_coordination:
-      enabled: true                     # 默认禁用，向后兼容
-      min_consensus_score: 0.65          # 最小共识强度
-      conflict_penalty: 0.2             # 冲突惩罚系数
-      max_conflicting_algos: 3          # 最大冲突算法数量
+      enabled: true                     # 启用方向协调
+      min_consensus_score: 0.5          # 🔧 降低：50%共识即可（原65%）
+      conflict_penalty: 0.1             # 🔧 降低：冲突惩罚系数
+      max_conflicting_algos: 5          # 🔧 增加：允许更多冲突
 
       # 完全可配置的算法权重
       algorithm_weights:
         STATISTICAL: 0.25               # 统计突破权重
-        MOMENTUM: 0.1                 # 动量突破权重
-        CONSECUTIVE: 0.1               # 连续变动权重
-        VOLUME: 0.35                   # 成交量突破权重
-        PATH: 0.2                     # 路径突破权重
+        MOMENTUM: 0.25                 # 🔧 提高：动量突破权重
+        CONSECUTIVE: 0.15               # 连续变动权重
+        VOLUME: 0.20                   # 成交量突破权重
+        PATH: 0.15                     # 路径突破权重
 
       # 阈值设置
-      min_confidence_threshold: 0.25      # 最小置信度阈值
-      direction_penalty_threshold: 0.5   # 方向惩罚阈值
+      min_confidence_threshold: 0.2      # 🔧 降低：最小置信度阈值（原0.25）
+      direction_penalty_threshold: 0.7   # 🔧 提高：方向惩罚阈值
+      min_strength_threshold: 1.5       # 🔥 新增：最小突破强度要求
 
       # 确认窗口设置
       direction_confirmation_window: 2000  # 方向确认窗口(ms)
-      min_direction_confirmations: 2      # 最小方向确认数
-      direction_consistency_threshold: 0.6 # 方向一致性阈值
+      min_direction_confirmations: 1      # 🔧 降低：最小方向确认数（原2）
+      direction_consistency_threshold: 0.5 # 🔧 降低：方向一致性阈值（原0.6）
 
-    # 统计突破 - 严格版
+    # 统计突破 - 🔧 适合爆发性突破
     statistical_breakout:
       enabled: true
-      price_deviation_threshold: 3.5  # 从2.0提高到3.5
-      momentum_ratio_threshold: 2.5   # 从2.0提高到3.0
-      min_sample_size: 200             # 新增：至少100个tick样本
+      price_deviation_threshold: 2.0  # 🔧 降低：2倍标准差即可（原3.5）
+      min_sample_size: 50              # 🔧 降低：最小样本数（原200）
 
-    # 连续变动突破 - 严格版
+    # 连续变动突破 - 🔧 适合爆发性突破
     consecutive_breakout:
       enabled: true
-      min_consecutive_moves: 2          # 从5增加到8
-      min_move_threshold: 0.001         # 新增：每次变动至少0.2%
+      min_consecutive_moves: 3          # 🔧 降低：连续3次即可（原2->8）
+      min_move_threshold: 0.002        # 每次变动至少0.2%
 
-    # 成交量突破 - 🔧 调试优化版
+    # 成交量突破 - 🔧 调整为适合爆发性突破
     volume_breakout:
       enabled: true
-      volume_surge_threshold: 1.2      # 🔧 更低：5%成交量增长即可触发
-      min_price_change: 0.005        # 🔧 更低：0.005%价格变动
-      min_avg_volume: 1                # 🔧 最低：不限制最小成交量
-      min_data_points: 100               # 🔧 最低：单个tick即可计算
+      volume_surge_threshold: 1.5      # 1.5倍成交量增长
+      min_price_change: 0.01          # 🔧 提高：0.01%价格变动（过滤微小波动）
+      min_avg_volume: 1                # 不限制最小成交量
+      min_data_points: 20              # 🔧 降低：最小数据点数（原100）
 
-    # 路径突破 - 🔧 调试优化版
+    # 路径突破 - 🔧 调整为适合爆发性突破
     path_breakout:
       enabled: true
-      breakout_threshold: 0.005       # 🔧 超低：0.05%突破阈值 (降低10倍)
-      support_resistance_window: 50     # 🔧 降低：支撑阻力窗口
-      min_data_points: 50               # 🔧 降低：最小数据点数
-      virtual_level_offset: 0.001     # 🔧 降低：虚拟支撑阻力位偏移0.01%
+      breakout_threshold: 0.01        # 🔧 提高：1%突破阈值（原0.005%太低）
+      support_resistance_window: 50     # 支撑阻力窗口
+      min_data_points: 50              # 最小数据点数
+      virtual_level_offset: 0.002     # 虚拟支撑阻力位偏移
 
   # 原有突破检测器（基于OHLCV）
   breakout:

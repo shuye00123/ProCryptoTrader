@@ -89,7 +89,7 @@ class DirectionCoordinator:
         self.logger = logging.getLogger(f"{self.__class__.__name__}")
 
     def calculate_consensus(self, direction_scores: List[DirectionScore]) -> DirectionConsensus:
-        """计算方向共识"""
+        """计算方向共识 - 🔧 修复：使用相对强度计算"""
         if not direction_scores:
             return DirectionConsensus(
                 direction="HOLD",
@@ -116,6 +116,10 @@ class DirectionCoordinator:
                 penalty_factor=1.0
             )
 
+        # 🔧 修复：使用参与算法的权重和，而非所有算法的权重和
+        # 这样可以让少数强信号也能通过
+        used_weights_sum = sum(self.algo_weights.get(s.algorithm, 0.2) for s in valid_scores)
+
         # 加权计算买卖强度
         total_buy_weight = 0.0
         total_sell_weight = 0.0
@@ -135,9 +139,12 @@ class DirectionCoordinator:
             elif score.sell_strength > score.buy_strength:
                 sell_algorithms.append(score.algorithm)
 
-        # 计算共识强度
-        weight_sum = sum(self.algo_weights.values())
-        consensus_score = abs(total_buy_weight - total_sell_weight) / weight_sum
+        # 🔧 修复：使用参与算法的权重和计算共识强度
+        # 这样只要有强信号参与，就能达到阈值
+        if used_weights_sum > 0:
+            consensus_score = abs(total_buy_weight - total_sell_weight) / used_weights_sum
+        else:
+            consensus_score = 0.0
 
         # 冲突检测
         conflicting_count = min(len(buy_algorithms), len(sell_algorithms))
@@ -157,18 +164,21 @@ class DirectionCoordinator:
             else:
                 direction = "SELL"
         else:
-            direction = "HOLD"  # 降低信号强度但不拒绝
+            direction = "HOLD"
 
         self.logger.debug(f"[DEBUG] 方向共识计算结果: {direction}, "
-                        f"共识强度={final_consensus:.3f}, "
+                        f"原始共识={consensus_score:.3f}, "
+                        f"最终共识={final_consensus:.3f}, "
+                        f"使用权重={used_weights_sum:.3f}, "
                         f"买入算法={buy_algorithms}, "
                         f"卖出算法={sell_algorithms}, "
-                        f"冲突数={conflicting_count}")
+                        f"冲突数={conflicting_count}, "
+                        f"惩罚={penalty_factor:.3f}")
 
         return DirectionConsensus(
             direction=direction,
             consensus_score=final_consensus,
-            confidence=total_confidence / len(valid_scores),
+            confidence=total_confidence / len(valid_scores) if valid_scores else 0.0,
             buy_algorithms=buy_algorithms,
             sell_algorithms=sell_algorithms,
             conflicting_count=conflicting_count,
@@ -316,12 +326,12 @@ class TickBreakoutDetector:
             # 1. 数据标准化
             tick = self.normalize_tick_data(raw_tick, symbol)
             if not tick:
-                self.logger.debug(f"[DEBUG] TICK失败 - {symbol}: 数据标准化失败")
+                self.logger.debug(f"[PROCESS] TICK失败 - {symbol}: 数据标准化失败")
                 return None
 
             # 2. 噪音过滤
             if not self.filter_market_noise(tick, symbol):
-                self.logger.debug(f"[DEBUG] TICK过滤 - {symbol}: 市场噪音过滤")
+                self.logger.debug(f"[PROCESS] TICK过滤 - {symbol}: 市场噪音过滤")
                 return None
 
             # 3. 更新历史数据 (先更新数据再检查充足性)
@@ -330,15 +340,17 @@ class TickBreakoutDetector:
             # 4. 数据充足性检查
             _, price_history, _, _ = self._get_symbol_buffers(symbol)
             if len(price_history) < 50:
-                self.logger.debug(f"[DEBUG] TICK跳过 - {symbol}: 历史数据不足({len(price_history)}<50)")
+                self.logger.debug(f"[PROCESS] TICK跳过 - {symbol}: 历史数据不足({len(price_history)}/50)")
                 return None
+            elif len(price_history) == 50:
+                self.logger.info(f"[PROCESS] ✓ {symbol}: 历史数据达到50tick，开始检测突破")
 
             # 5. 每个交易对独立的冷却期检查
             current_time = tick.timestamp
             last_breakout_time = self.last_breakout_times.get(symbol, 0)
             cooldown_remaining = self.breakout_cooldown - (current_time - last_breakout_time)
             if cooldown_remaining > 0:
-                self.logger.debug(f"[DEBUG] TICK跳过 - {symbol}: 冷却期剩余{cooldown_remaining/1000:.1f}秒")
+                self.logger.debug(f"[PROCESS] TICK跳过 - {symbol}: 冷却期剩余{cooldown_remaining/1000:.1f}秒")
                 return None
 
             # 6. 多维度突破检测
@@ -346,13 +358,13 @@ class TickBreakoutDetector:
 
             if breakout_signal:
                 self.last_breakout_times[symbol] = current_time  # 更新该交易对的冷却期
-                self.logger.info(f"[SIGNAL] Tick突破信号生成: {symbol} - {breakout_signal.reason}")
-                self.logger.debug(f"[SIGNAL] 信号详情: 类型={breakout_signal.signal_type}, "
+                self.logger.warning(f"[SIGNAL] ✓✓✓ Tick突破信号生成: {symbol} - {breakout_signal.reason}")
+                self.logger.info(f"[SIGNAL] 信号详情: 类型={breakout_signal.signal_type}, "
                                  f"价格={breakout_signal.price}, "
-                                 f"数量={breakout_signal.amount}, "
+                                 f"数量={breakout_signal.amount:.6f}, "
                                  f"置信度={breakout_signal.confidence:.2f}")
             else:
-                self.logger.debug(f"[DEBUG] TICK完成 - {symbol}: 无突破信号")
+                self.logger.debug(f"[PROCESS] TICK完成 - {symbol}: 无突破信号")
 
             return breakout_signal
 
@@ -813,6 +825,7 @@ class TickBreakoutDetector:
         std_price = np.std(prices)
 
         if std_price == 0:
+            self.logger.debug(f"   STATISTICAL: 标准差为0，跳过检测")
             return DirectionScore(algorithm="STATISTICAL", confidence=0.0)
 
         # 🔥 保留方向信息，不使用abs()
@@ -821,6 +834,10 @@ class TickBreakoutDetector:
         # 自适应阈值
         volatility = std_price / mean_price if mean_price > 0 else 0
         adaptive_threshold = self.calculate_adaptive_threshold(volatility)
+
+        self.logger.debug(f"   STATISTICAL: 价格={tick.price:.2f}, 均值={mean_price:.2f}, "
+                        f"标准差={std_price:.2f}, 波动率={volatility:.4f}, "
+                        f"偏离度={price_deviation:.2f}, 阈值={adaptive_threshold:.2f}")
 
         if abs(price_deviation) > adaptive_threshold:
             strength = min(abs(price_deviation) / 3.0, 1.0)
@@ -838,8 +855,8 @@ class TickBreakoutDetector:
                 direction_bias = -strength
                 direction_desc = "向下突破"
 
-            self.logger.debug(f"   STATISTICAL方向: {direction_desc}, "
-                            f"偏离度={price_deviation:.2f}, "
+            self.logger.info(f"   STATISTICAL ✓: {direction_desc}, "
+                            f"偏离度={price_deviation:.2f} > 阈值={adaptive_threshold:.2f}, "
                             f"强度={strength:.3f}, "
                             f"置信度={confidence:.3f}")
 
@@ -858,6 +875,7 @@ class TickBreakoutDetector:
                 }
             )
 
+        self.logger.debug(f"   STATISTICAL ✗: 偏离度={price_deviation:.2f} < 阈值={adaptive_threshold:.2f}")
         return DirectionScore(algorithm="STATISTICAL", confidence=0.0)
 
     def detect_momentum_breakout(self, tick: TickData, symbol: str) -> bool:
@@ -900,6 +918,7 @@ class TickBreakoutDetector:
         price_changes = list(price_change_history)
 
         if len(price_changes) < 20:
+            self.logger.debug(f"   MOMENTUM ✗: 数据不足 ({len(price_changes)} < 20)")
             return DirectionScore(algorithm="MOMENTUM", confidence=0.0)
 
         # 🔥 保留动量方向，不使用abs()
@@ -907,6 +926,7 @@ class TickBreakoutDetector:
         long_momentum = np.mean(price_changes[-20:])  # 最近20个变动
 
         if long_momentum == 0:
+            self.logger.debug(f"   MOMENTUM ✗: 长期动量为0")
             return DirectionScore(algorithm="MOMENTUM", confidence=0.0)
 
         momentum_ratio = abs(short_momentum / long_momentum)
@@ -927,11 +947,12 @@ class TickBreakoutDetector:
                 direction_bias = -strength
                 direction_desc = "负向动量加速"
 
-            self.logger.debug(f"   MOMENTUM方向: {direction_desc}, "
+            self.logger.info(f"   MOMENTUM ✓: {direction_desc}, "
                             f"短期动量={short_momentum:.4f}, "
                             f"长期动量={long_momentum:.4f}, "
                             f"比率={momentum_ratio:.2f}, "
-                            f"强度={strength:.3f}")
+                            f"强度={strength:.3f}, "
+                            f"置信度={confidence:.3f}")
 
             return DirectionScore(
                 buy_strength=buy_strength,
@@ -947,6 +968,7 @@ class TickBreakoutDetector:
                 }
             )
 
+        self.logger.debug(f"   MOMENTUM ✗: 比率={momentum_ratio:.2f} < 阈值={self.momentum_ratio_threshold:.2f} 或 动量过小")
         return DirectionScore(algorithm="MOMENTUM", confidence=0.0)
 
     def detect_consecutive_moves_breakout(self, tick: TickData, symbol: str) -> bool:
@@ -1188,6 +1210,7 @@ class TickBreakoutDetector:
 
         # 检查last_quantity数据
         if tick.last_quantity is None or tick.last_quantity <= 0:
+            self.logger.debug(f"   VOLUME ✗: last_quantity数据缺失或为0")
             return DirectionScore(algorithm="VOLUME", confidence=0.0)
 
         # 获取该交易对的历史数据
@@ -1197,6 +1220,7 @@ class TickBreakoutDetector:
 
         # 🔧 使用配置化的数据要求
         if len(volumes) < self.volume_min_data_points or len(prices) == 0:
+            self.logger.debug(f"   VOLUME ✗: 数据不足 (volumes={len(volumes)}, prices={len(prices)})")
             return DirectionScore(algorithm="VOLUME", confidence=0.0)
 
         # 🔥 修复：使用last_quantity滑动窗口
@@ -1204,6 +1228,7 @@ class TickBreakoutDetector:
 
         # 🔥 关键修复：使用历史last_quantity数据，排除当前tick
         if len(volumes) < window_size + 1:
+            self.logger.debug(f"   VOLUME ✗: 窗口数据不足 ({len(volumes)} < {window_size + 1})")
             return DirectionScore(algorithm="VOLUME", confidence=0.0)
 
         historical_quantities = volumes[-(window_size + 1):-1]  # 排除当前tick
@@ -1250,13 +1275,14 @@ class TickBreakoutDetector:
                 direction_bias = -strength
                 direction_desc = "放量下跌"
 
-            self.logger.debug(f"   VOLUME滑动窗口方向: {direction_desc}, "
+            self.logger.info(f"   VOLUME ✓: {direction_desc}, "
                             f"窗口大小={window_size}, "
                             f"比率={quantity_ratio:.2f}, "
                             f"窗口均值={mean_quantity:.4f}, "
                             f"窗口范围=[{min(historical_quantities):.4f}, {max(historical_quantities):.4f}], "
                             f"价格变动={tick.price_change:.4f}, "
-                            f"强度={strength:.3f}")
+                            f"强度={strength:.3f}, "
+                            f"置信度={confidence:.3f}")
 
             return DirectionScore(
                 buy_strength=buy_strength,
@@ -1276,6 +1302,7 @@ class TickBreakoutDetector:
                 }
             )
 
+        self.logger.debug(f"   VOLUME ✗: 量价条件不满足 (比率={quantity_ratio if 'quantity_ratio' in locals() else 'N/A':.2f} < {self.volume_surge_threshold:.2f} 或 价格变动过小)")
         return DirectionScore(algorithm="VOLUME", confidence=0.0)
 
     def _detect_consecutive_direction(self, tick: TickData, symbol: str) -> DirectionScore:
@@ -1303,9 +1330,10 @@ class TickBreakoutDetector:
             else:
                 return DirectionScore(algorithm="CONSECUTIVE", confidence=0.0)
 
-            self.logger.debug(f"   CONSECUTIVE方向: {direction_desc}, "
+            self.logger.info(f"   CONSECUTIVE ✓: {direction_desc}, "
                             f"当前趋势={current_trend}, "
-                            f"强度={strength:.3f}")
+                            f"强度={strength:.3f}, "
+                            f"置信度={confidence:.3f}")
 
             return DirectionScore(
                 buy_strength=buy_strength,
@@ -1320,6 +1348,7 @@ class TickBreakoutDetector:
                 }
             )
 
+        self.logger.debug(f"   CONSECUTIVE ✗: 连续次数不足 ({current_count} < {self.consecutive_moves_threshold})")
         return DirectionScore(algorithm="CONSECUTIVE", confidence=0.0)
 
     def _detect_path_direction(self, tick: TickData, symbol: str) -> DirectionScore:
@@ -1330,6 +1359,7 @@ class TickBreakoutDetector:
         prices = list(price_history)
 
         if len(prices) < 50:
+            self.logger.debug(f"   PATH ✗: 数据不足 ({len(prices)} < 50)")
             return DirectionScore(algorithm="PATH", confidence=0.0)
 
         # 寻找关键价格水平
@@ -1356,12 +1386,14 @@ class TickBreakoutDetector:
             direction_bias = -strength
             direction_desc = "向下突破支撑位"
         else:
+            self.logger.debug(f"   PATH ✗: 无支撑阻力位突破 (当前价={current_price:.2f}, 阻力={resistance:.2f if resistance else 'N/A'}, 支撑={support:.2f if support else 'N/A'})")
             return DirectionScore(algorithm="PATH", confidence=0.0)
 
-        self.logger.debug(f"   PATH方向: {direction_desc}, "
+        self.logger.info(f"   PATH ✓: {direction_desc}, "
                         f"当前价格={current_price:.2f}, "
                         f"突破位={resistance if resistance else support:.2f}, "
-                        f"强度={strength:.3f}")
+                        f"强度={strength:.3f}, "
+                        f"置信度={confidence:.3f}")
 
         return DirectionScore(
             buy_strength=buy_strength,
@@ -2008,9 +2040,10 @@ class TickBreakoutDetector:
 
         current_time = tick.timestamp
 
-        self.logger.debug(f"[DEBUG] 🔥 方向协调检测开始 - {symbol}: "
+        self.logger.info(f"[DETECT] 🔥 方向协调检测开始 - {symbol}: "
                         f"价格={tick.price:.2f}, "
                         f"变动={tick.price_change:+.2f}, "
+                        f"变动%={tick.price_change_percent if tick.price_change_percent else 0:.3f}%, "
                         f"成交量={tick.volume:.0f}")
 
         # 1. 收集所有算法的方向评分
@@ -2019,39 +2052,47 @@ class TickBreakoutDetector:
 
         algorithms = ["STATISTICAL", "MOMENTUM", "CONSECUTIVE", "VOLUME", "PATH"]
 
+        # 🔧 修复：使用配置的最小置信度阈值，而非硬编码的0.3
+        min_confidence = self.direction_coordinator.min_confidence_threshold
+
+        self.logger.info(f"[DETECT] 置信度阈值: {min_confidence}, 算法数量: {len(algorithms)}")
+
         for algorithm in algorithms:
             try:
                 score = self._detect_with_direction(tick, algorithm, symbol)
-                if score.confidence > 0.3:  # 最小置信度阈值
+
+                # 🔧 修复：使用配置的阈值
+                if score.confidence >= min_confidence:
                     direction_scores.append(score)
                     active_algorithms.append(algorithm)
 
-                    self.logger.debug(f"   {algorithm}: 方向评分获取成功, "
+                    self.logger.info(f"   ✓ {algorithm}: 置信度={score.confidence:.3f}, "
                                     f"买入={score.buy_strength:.3f}, "
                                     f"卖出={score.sell_strength:.3f}, "
-                                    f"置信度={score.confidence:.3f}")
+                                    f"方向偏差={score.direction_bias:+.3f}")
                 else:
-                    self.logger.debug(f"   {algorithm}: 置信度过低({score.confidence:.3f}), 跳过")
+                    self.logger.debug(f"   ✗ {algorithm}: 置信度过低({score.confidence:.3f} < {min_confidence})")
 
             except Exception as e:
-                self.logger.debug(f"   {algorithm}: 检测失败: {e}")
+                self.logger.debug(f"   ✗ {algorithm}: 检测失败: {e}")
 
         if not direction_scores:
-            self.logger.debug(f"[DEBUG] 没有有效的方向评分，跳过信号生成")
+            self.logger.warning(f"[DETECT] ❌ 没有有效的方向评分（所有算法置信度都低于{min_confidence}），跳过信号生成")
             return None
 
-        self.logger.debug(f"[DEBUG] 收集到 {len(direction_scores)} 个有效方向评分: "
+        self.logger.info(f"[DETECT] ✓ 收集到 {len(direction_scores)} 个有效方向评分: "
                         f"{[s.algorithm for s in direction_scores]}")
 
         # 2. 方向协调计算
         consensus = self.direction_coordinator.calculate_consensus(direction_scores)
 
-        self.logger.debug(f"[DEBUG] 方向共识结果: {consensus.direction}, "
-                        f"共识强度={consensus.consensus_score:.3f}, "
+        self.logger.info(f"[DETECT] 方向共识结果: {consensus.direction}, "
+                        f"共识强度={consensus.consensus_score:.3f} (阈值:{self.direction_coordinator.min_consensus_score}), "
                         f"置信度={consensus.confidence:.3f}, "
                         f"买入算法={consensus.buy_algorithms}, "
                         f"卖出算法={consensus.sell_algorithms}, "
-                        f"冲突数={consensus.conflicting_count}")
+                        f"冲突数={consensus.conflicting_count}, "
+                        f"惩罚因子={consensus.penalty_factor:.3f}")
 
         # 3. 多重确认机制集成方向协调
         if self.require_multiple_confirmation:
@@ -2065,9 +2106,11 @@ class TickBreakoutDetector:
 
         # 4. 生成信号
         if consensus.direction != "HOLD":
+            self.logger.info(f"[DETECT] ✓✓✓ 生成交易信号！方向={consensus.direction}, "
+                           f"共识强度={consensus.consensus_score:.3f}")
             return self._create_direction_aware_signal(tick, consensus, symbol)
         else:
-            self.logger.debug(f"[DEBUG] 方向共识为HOLD，不生成信号")
+            self.logger.info(f"[DETECT] ❌ 方向共识为HOLD（共识强度{consensus.consensus_score:.3f} < 阈值{self.direction_coordinator.min_consensus_score}），不生成信号")
             return None
 
     def _add_directional_signal_to_window(self, symbol: str, consensus: DirectionConsensus, tick: TickData, timestamp: float):
