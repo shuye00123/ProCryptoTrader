@@ -265,12 +265,20 @@ class BinanceWebSocketClient:
             # 发送订阅消息
             await self._subscribe_all_ticker()
 
-            # 启动心跳监控任务
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
-
-            # 开始消息处理循环
+            # 先启动消息处理循环，让它开始接收数据
             self._message_task = asyncio.create_task(self._message_loop())
-            await self._message_task  # 等待消息循环结束
+
+            # 等待一小段时间，确保消息循环已经开始接收到数据
+            # 然后再启动心跳监控任务
+            await asyncio.sleep(1)
+
+            # 现在启动心跳监控任务
+            if self.is_connected and self.is_running:
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
+                logger.info("心跳监控任务已启动")
+
+            # 等待消息循环结束
+            await self._message_task
 
         except Exception as e:
             logger.error(f"WebSocket连接失败: {e}")
@@ -309,13 +317,15 @@ class BinanceWebSocketClient:
         定期检查连接状态，确保WebSocket连接活跃
         每30秒检查一次，如果超过5分钟没有收到任何数据，记录警告
         """
-        logger.info("启动心跳监控任务")
+        logger.info(f"启动心跳监控任务 - is_running={self.is_running}, is_connected={self.is_connected}")
 
         while self.is_running and self.is_connected:
             try:
+                logger.debug(f"心跳监控循环 - is_running={self.is_running}, is_connected={self.is_connected}")
                 await asyncio.sleep(30)  # 每30秒检查一次
 
                 if not self.is_connected:
+                    logger.info("心跳监控: is_connected变为False，退出循环")
                     break
 
                 now = datetime.now()
@@ -352,6 +362,8 @@ class BinanceWebSocketClient:
                         except Exception as e:
                             logger.error(f"Ping失败: {e}")
                             self.is_connected = False
+                else:
+                    logger.info(f"心跳监控: 尚未收到任何消息，已运行:{(now - self.stats['connection_start_time']).total_seconds():.0f}秒")
 
             except asyncio.CancelledError:
                 logger.info("心跳监控任务被取消")
@@ -359,18 +371,20 @@ class BinanceWebSocketClient:
             except Exception as e:
                 logger.error(f"心跳监控异常: {e}")
 
-        logger.info("心跳监控任务结束")
+        logger.info(f"心跳监控任务结束 - is_running={self.is_running}, is_connected={self.is_connected}")
 
     async def _message_loop(self):
         """消息处理循环"""
         self.is_running = True
-        logger.info("开始消息处理循环")
+        logger.info(f"开始消息处理循环 - is_running={self.is_running}, is_connected={self.is_connected}")
 
         try:
             while self.is_running and self.is_connected:
                 try:
+                    logger.debug(f"等待接收消息... is_connected={self.is_connected}")
                     # 接收消息 (不设置超时，依赖Binance服务器的ping/pong机制)
                     message = await self.ws_connection.recv()
+                    logger.debug(f"收到消息，长度: {len(message) if message else 0}")
 
                     # 处理消息
                     await self._handle_message(message)
@@ -392,7 +406,7 @@ class BinanceWebSocketClient:
 
         finally:
             self.is_running = False
-            logger.info("消息处理循环结束")
+            logger.info(f"消息处理循环结束 - is_running={self.is_running}, is_connected={self.is_connected}")
 
     async def _handle_message(self, message: str):
         """处理WebSocket消息
