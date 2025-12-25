@@ -191,30 +191,25 @@ class BinanceWebSocketClient:
         self.error_callbacks.append(callback)
         logger.info(f"添加错误回调函数，当前总数: {len(self.error_callbacks)}")
 
-    def _call_ticker_callbacks(self, ticker: TickerData):
-        """调用所有Ticker回调函数"""
+    async def _call_ticker_callbacks(self, ticker: TickerData):
+        """调用所有Ticker回调函数（异步版本，避免阻塞事件循环）
+
+        关键: 此方法必须是非阻塞的，否则会延迟WebSocket ping/pong响应
+        导致Binance服务器在10分钟后断开连接
+        """
+        # 调用同步回调函数
         for callback in self.ticker_callbacks:
             try:
                 callback(ticker)
             except Exception as e:
                 logger.error(f"Ticker回调函数执行失败: {e}")
 
-        # 🔥 集成Tick数据管理器 - 最小侵入式集成
+        # 🔥 集成Tick数据管理器 - 使用异步任务避免阻塞
         if TICK_MANAGER:
             try:
-                import asyncio
-                # 如果在异步上下文中，直接调用；否则创建新任务
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # 在异步上下文中，创建任务
-                        asyncio.create_task(TICK_MANAGER.collect_tick(ticker))
-                    else:
-                        # 不在异步上下文中，运行一次性任务
-                        loop.run_until_complete(TICK_MANAGER.collect_tick(ticker))
-                except RuntimeError:
-                    # 没有事件循环，创建新的
-                    asyncio.run(TICK_MANAGER.collect_tick(ticker))
+                # 创建后台任务处理tick收集，不阻塞消息循环
+                # 使用fire-and-forget模式，不等待结果
+                asyncio.create_task(TICK_MANAGER.collect_tick(ticker))
             except Exception as e:
                 logger.error(f"Tick数据收集失败: {e}")
 
@@ -251,8 +246,9 @@ class BinanceWebSocketClient:
             )
 
             self.is_connected = True
-            self.reconnect_count = 0
+            self.reconnect_count = 0  # 连接成功后重置重连计数
             self.stats['connection_start_time'] = datetime.now()
+            self.stats['total_reconnects'] = self.stats.get('total_reconnects', 0)  # 累计重连次数（不重置）
 
             logger.info("WebSocket连接成功")
 
@@ -367,8 +363,8 @@ class BinanceWebSocketClient:
                 self.ticker_cache[ticker.symbol] = ticker
                 self.last_update_time[ticker.symbol] = datetime.now()
 
-                # 调用回调函数
-                self._call_ticker_callbacks(ticker)
+                # 异步调用回调函数（避免阻塞消息循环）
+                await self._call_ticker_callbacks(ticker)
 
     async def _process_single_message(self, data: Dict):
         """处理单个消息
@@ -390,8 +386,8 @@ class BinanceWebSocketClient:
                 self.ticker_cache[ticker.symbol] = ticker
                 self.last_update_time[ticker.symbol] = datetime.now()
 
-                # 调用回调函数
-                self._call_ticker_callbacks(ticker)
+                # 异步调用回调函数（避免阻塞消息循环）
+                await self._call_ticker_callbacks(ticker)
                 logger.debug(f"处理单个Ticker数据: {ticker.symbol}")
         elif 'stream' in data and 'data' in data:
             # 处理包装格式的Ticker数据 (币安现货格式)
@@ -402,8 +398,8 @@ class BinanceWebSocketClient:
                 self.ticker_cache[ticker.symbol] = ticker
                 self.last_update_time[ticker.symbol] = datetime.now()
 
-                # 调用回调函数
-                self._call_ticker_callbacks(ticker)
+                # 异步调用回调函数（避免阻塞消息循环）
+                await self._call_ticker_callbacks(ticker)
                 logger.debug(f"处理单个Ticker数据: {ticker.symbol}")
         else:
             logger.info(f"未处理的消息: {data}")
@@ -415,7 +411,13 @@ class BinanceWebSocketClient:
             error: 错误信息
         """
         self.stats['errors_count'] += 1
-        logger.error(f"连接错误: {error}")
+
+        # 判断错误类型
+        error_type = type(error).__name__
+        if "no close frame" in str(error):
+            logger.warning(f"连接异常断开: {error}")
+        else:
+            logger.error(f"连接错误: {error}")
 
         # 调用错误回调
         self._call_error_callbacks(error)
@@ -424,9 +426,14 @@ class BinanceWebSocketClient:
         if self.reconnect_count < self.max_reconnects:
             self.reconnect_count += 1
             self.stats['reconnects_count'] = self.reconnect_count
+            self.stats['total_reconnects'] = self.stats.get('total_reconnects', 0) + 1
 
-            logger.info(f"尝试重连 ({self.reconnect_count}/{self.max_reconnects})")
-            await asyncio.sleep(self.reconnect_interval)
+            # 指数退避：每次重连间隔增加
+            backoff_interval = min(self.reconnect_interval * (1.5 ** (self.reconnect_count - 1)), 60)
+
+            logger.info(f"尝试重连 ({self.reconnect_count}/{self.max_reconnects}), "
+                       f"等待 {backoff_interval:.1f} 秒后开始...")
+            await asyncio.sleep(backoff_interval)
 
             try:
                 await self.connect_all_ticker()
