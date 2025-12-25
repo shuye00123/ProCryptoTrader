@@ -243,8 +243,14 @@ class StreamingDiskQueue:
                     # 关键优化: 写完立即清空该交易对的内存
                     cleared_count = clear_symbol_func(symbol)
 
+                    # 获取文件名（file_path可能是字符串或Path对象）
+                    if isinstance(file_path, str):
+                        file_name = Path(file_path).name
+                    else:
+                        file_name = file_path.name
+
                     logger.debug(f"交易对 {symbol} 已写入临时文件并清空内存: "
-                                f"{file_path.name} ({cleared_count} ticks)")
+                                f"{file_name} ({cleared_count} ticks)")
 
                 except Exception as e:
                     logger.error(f"写入交易对 {symbol} 失败: {e}")
