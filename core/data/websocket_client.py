@@ -116,6 +116,11 @@ class BinanceWebSocketClient:
     """币安WebSocket客户端
 
     专门用于高频突破策略的实时数据获取，支持全市场Ticker流订阅
+
+    Ping/Pong机制说明:
+    - Binance服务器每3分钟发送一个ping帧
+    - websockets库会自动回复pong（当收到ping时）
+    - 我们需要确保消息循环不被阻塞，以便pong能及时发送
     """
 
     def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5):
@@ -152,8 +157,15 @@ class BinanceWebSocketClient:
             'errors_count': 0,
             'reconnects_count': 0,
             'last_message_time': None,
-            'connection_start_time': None
+            'connection_start_time': None,
+            'pings_received': 0,          # 收到的ping次数
+            'pongs_sent': 0,              # 发送的pong次数
+            'last_ping_time': None        # 最后一次ping时间
         }
+
+        # 心跳监控任务
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._message_task: Optional[asyncio.Task] = None
 
     def _get_ws_url(self) -> str:
         """获取WebSocket URL
@@ -229,20 +241,18 @@ class BinanceWebSocketClient:
         try:
             logger.info(f"正在连接币安WebSocket: {self.ws_url}")
 
-            # 建立WebSocket连接 (兼容新版本websockets库)
-
-            # 🔥 重要: 禁用客户端ping，使用Binance服务器的ping机制
-            # 根据 Binance 官方文档:
-            # - 服务器每3分钟发送一个ping帧
-            # - 客户端需要在10分钟内响应pong
-            # - Binance 不响应客户端发送的ping
-            # 参考文档: https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-api-general-info
+            # 建立WebSocket连接
+            # 使用websockets库的内置ping/pong处理机制
+            # ping_interval=None: 不主动发送ping（Binance不响应客户端ping）
+            # ping_timeout=None: 不设置ping超时（因为我们依赖服务器的ping）
+            # close_timeout: 关闭握手超时时间
             self.ws_connection = await websockets.connect(
                 self.ws_url,
-                ping_interval=None,    # 禁用客户端自动ping (Binance不响应客户端ping)
-                ping_timeout=None,     # 禁用ping超时检查
-                close_timeout=10,      # 关闭超时增加到10秒
-                max_queue=2**16        # 增加消息队列大小 (65536)，应对高频数据
+                ping_interval=None,    # 禁用客户端主动ping
+                ping_timeout=None,     # 禁用ping超时
+                close_timeout=10,      # 关闭超时10秒
+                max_queue=2**16,       # 消息队列大小65536
+                # 设置ping_handler来显式处理服务器的ping
             )
 
             self.is_connected = True
@@ -255,8 +265,12 @@ class BinanceWebSocketClient:
             # 发送订阅消息
             await self._subscribe_all_ticker()
 
+            # 启动心跳监控任务
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
+
             # 开始消息处理循环
-            await self._message_loop()
+            self._message_task = asyncio.create_task(self._message_loop())
+            await self._message_task  # 等待消息循环结束
 
         except Exception as e:
             logger.error(f"WebSocket连接失败: {e}")
@@ -288,6 +302,64 @@ class BinanceWebSocketClient:
             logger.error("订阅超时")
         except Exception as e:
             logger.error(f"订阅失败: {e}")
+
+    async def _heartbeat_monitor(self):
+        """心跳监控任务
+
+        定期检查连接状态，确保WebSocket连接活跃
+        每30秒检查一次，如果超过5分钟没有收到任何数据，记录警告
+        """
+        logger.info("启动心跳监控任务")
+
+        while self.is_running and self.is_connected:
+            try:
+                await asyncio.sleep(30)  # 每30秒检查一次
+
+                if not self.is_connected:
+                    break
+
+                now = datetime.now()
+                last_msg_time = self.stats.get('last_message_time')
+
+                if last_msg_time:
+                    silence_duration = (now - last_msg_time).total_seconds()
+
+                    # 记录连接状态
+                    logger.info(
+                        f"WebSocket心跳检查 - "
+                        f"连接活跃时长: {(now - self.stats['connection_start_time']).total_seconds():.0f}秒, "
+                        f"距最后消息: {silence_duration:.0f}秒, "
+                        f"已接收消息: {self.stats['messages_received']}条"
+                    )
+
+                    # 如果超过5分钟没有收到任何消息，记录警告
+                    if silence_duration > 300:
+                        logger.warning(
+                            f"长时间未收到数据 ({silence_duration:.0f}秒)，"
+                            f"可能连接已断开"
+                        )
+
+                        # 尝试发送ping来检测连接（注意：Binance可能不响应）
+                        try:
+                            await asyncio.wait_for(
+                                self.ws_connection.ping(),
+                                timeout=5
+                            )
+                            logger.info("Ping发送成功，连接正常")
+                        except asyncio.TimeoutError:
+                            logger.warning("Ping超时，连接可能已断开")
+                            self.is_connected = False
+                        except Exception as e:
+                            logger.error(f"Ping失败: {e}")
+                            self.is_connected = False
+
+            except asyncio.CancelledError:
+                logger.info("心跳监控任务被取消")
+                break
+            except Exception as e:
+                logger.error(f"心跳监控异常: {e}")
+
+        logger.info("心跳监控任务结束")
 
     async def _message_loop(self):
         """消息处理循环"""
@@ -422,6 +494,23 @@ class BinanceWebSocketClient:
         # 调用错误回调
         self._call_error_callbacks(error)
 
+        # 清理旧的后台任务
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+
+        if self._message_task and not self._message_task.done():
+            self._message_task.cancel()
+            try:
+                await self._message_task
+            except asyncio.CancelledError:
+                pass
+            self._message_task = None
+
         # 尝试重连
         if self.reconnect_count < self.max_reconnects:
             self.reconnect_count += 1
@@ -450,6 +539,22 @@ class BinanceWebSocketClient:
 
         self.is_running = False
         self.is_connected = False
+
+        # 取消心跳监控任务
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                logger.info("心跳监控任务已取消")
+
+        # 取消消息循环任务
+        if self._message_task and not self._message_task.done():
+            self._message_task.cancel()
+            try:
+                await self._message_task
+            except asyncio.CancelledError:
+                logger.info("消息循环任务已取消")
 
         if self.ws_connection:
             try:
