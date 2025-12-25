@@ -208,8 +208,10 @@ class StreamingDiskQueue:
         file_paths = []
         loop = asyncio.get_event_loop()
 
-        # 创建写入任务列表和映射
+        # 创建写入任务集合
+        pending = set()
         future_to_symbol = {}
+
         for symbol, ticks in all_ticks.items():
             if not ticks:
                 continue
@@ -220,25 +222,32 @@ class StreamingDiskQueue:
                 self._write_symbol_to_parquet,
                 symbol, ticks
             )
+            pending.add(future)
             future_to_symbol[future] = symbol
 
-        # 等待所有写入完成并立即释放内存
-        # asyncio.as_completed() 返回一个异步迭代器，按完成顺序yield Future对象
-        for completed_future in asyncio.as_completed(future_to_symbol.keys()):
-            symbol = future_to_symbol[completed_future]
-            try:
-                file_path = await completed_future
-                file_paths.append(file_path)
+        # 使用asyncio.wait()循环处理完成的任务
+        while pending:
+            # 等待任意一个任务完成
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED
+            )
 
-                # 关键优化: 写完立即清空该交易对的内存
-                # 这样即使有多个交易对，内存峰值也会显著降低
-                cleared_count = clear_symbol_func(symbol)
+            # 处理已完成的任务
+            for completed_future in done:
+                symbol = future_to_symbol[completed_future]
+                try:
+                    file_path = completed_future.result()  # 获取结果（已完成的Future）
+                    file_paths.append(file_path)
 
-                logger.debug(f"交易对 {symbol} 已写入临时文件并清空内存: "
-                            f"{file_path.name} ({cleared_count} ticks)")
+                    # 关键优化: 写完立即清空该交易对的内存
+                    cleared_count = clear_symbol_func(symbol)
 
-            except Exception as e:
-                logger.error(f"写入交易对 {symbol} 失败: {e}")
+                    logger.debug(f"交易对 {symbol} 已写入临时文件并清空内存: "
+                                f"{file_path.name} ({cleared_count} ticks)")
+
+                except Exception as e:
+                    logger.error(f"写入交易对 {symbol} 失败: {e}")
 
         return file_paths
 
