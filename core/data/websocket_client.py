@@ -235,10 +235,19 @@ class BinanceWebSocketClient:
             logger.info(f"正在连接币安WebSocket: {self.ws_url}")
 
             # 建立WebSocket连接 (兼容新版本websockets库)
+
+            # 🔥 重要: 禁用客户端ping，使用Binance服务器的ping机制
+            # 根据 Binance 官方文档:
+            # - 服务器每3分钟发送一个ping帧
+            # - 客户端需要在10分钟内响应pong
+            # - Binance 不响应客户端发送的ping
+            # 参考文档: https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-api-general-info
             self.ws_connection = await websockets.connect(
                 self.ws_url,
-                ping_interval=30,  # 30秒心跳
-                close_timeout=1    # 1秒关闭超时
+                ping_interval=None,    # 禁用客户端自动ping (Binance不响应客户端ping)
+                ping_timeout=None,     # 禁用ping超时检查
+                close_timeout=10,      # 关闭超时增加到10秒
+                max_queue=2**16        # 增加消息队列大小 (65536)，应对高频数据
             )
 
             self.is_connected = True
@@ -292,18 +301,16 @@ class BinanceWebSocketClient:
         try:
             while self.is_running and self.is_connected:
                 try:
-                    # 接收消息
-                    message = await asyncio.wait_for(
-                        self.ws_connection.recv(),
-                        timeout=60  # 60秒超时
-                    )
+                    # 接收消息 (不设置超时，依赖Binance服务器的ping/pong机制)
+                    message = await self.ws_connection.recv()
 
                     # 处理消息
                     await self._handle_message(message)
 
                 except asyncio.TimeoutError:
-                    logger.warning("接收消息超时，发送ping保活")
-                    await self.ws_connection.ping()
+                    # 不应该发生，因为已经移除了 wait_for 的超时
+                    logger.warning("接收消息超时")
+                    continue
 
         except ConnectionClosed as e:
             logger.warning(f"WebSocket连接关闭: {e}")

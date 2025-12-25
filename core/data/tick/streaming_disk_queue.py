@@ -373,6 +373,8 @@ class StreamingDiskQueue:
     async def dequeue(self) -> Optional[dict]:
         """出队 - 获取文件路径列表
 
+        注意: 此方法不调用 task_done()，由消费者在处理完成后调用
+
         Returns:
             包含 file_paths 和 metadata 的字典，或 None
         """
@@ -386,7 +388,8 @@ class StreamingDiskQueue:
             self._stats['dequeued'] += 1
             self._stats['current_queue_size'] = self._queue.qsize()
 
-            self._queue.task_done()
+            # 不在这里调用 task_done()，由消费者在处理完成后调用
+            # 这样确保即使处理失败，也能正确标记完成
 
             logger.debug(f"从队列取出 {len(file_paths)} 个文件待处理")
 

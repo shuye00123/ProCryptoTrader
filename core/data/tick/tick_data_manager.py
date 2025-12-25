@@ -415,23 +415,25 @@ class TickDataManager:
                 if queue_item is None:
                     continue
 
-                # V3.0: 直接移动文件到最终目录 (无需读取+重新写入!)
-                results = await self._save_queue.move_files_to_final_destination(
-                    queue_item,
-                    get_final_path_func=self._get_final_storage_path
-                )
+                try:
+                    # V3.0: 直接移动文件到最终目录 (无需读取+重新写入!)
+                    results = await self._save_queue.move_files_to_final_destination(
+                        queue_item,
+                        get_final_path_func=self._get_final_storage_path
+                    )
 
-                # 更新统计
-                self._manager_stats['ticks_saved'] += results['total_ticks']
-                self._manager_stats['save_cycles'] += 1
-                self._manager_stats['last_save_time'] = time.time()
+                    # 更新统计
+                    self._manager_stats['ticks_saved'] += results['total_ticks']
+                    self._manager_stats['save_cycles'] += 1
+                    self._manager_stats['last_save_time'] = time.time()
 
-                logger.info(f"文件移动完成 - 移动: {len(results['moved'])}, "
-                           f"失败: {len(results['failed'])}, "
-                           f"tick数: {results['total_ticks']}")
-
-                # 标记任务完成
-                self._save_queue.task_done()
+                    logger.info(f"文件移动完成 - 移动: {len(results['moved'])}, "
+                               f"失败: {len(results['failed'])}, "
+                               f"tick数: {results['total_ticks']}")
+                finally:
+                    # 确保无论处理成功还是失败，都标记任务完成
+                    # 这防止 "task_done() called too many times" 错误
+                    self._save_queue.task_done()
 
             except asyncio.CancelledError:
                 break
