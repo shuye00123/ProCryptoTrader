@@ -308,3 +308,11 @@ tick_data_persistence:
     enable_metrics: true         # 启用指标收集
     log_level: "INFO"           # 日志级别
     alert_memory_threshold: 80  # 内存使用告警阈值(%)
+
+  # V3.0: 流式磁盘队列配置（新增）
+  streaming_queue:
+    enabled: true               # 启用流式磁盘队列
+    temp_dir: "data/temp"       # 临时文件目录
+    max_workers: 2              # 并行写入线程数（匹配2核CPU）
+    compression: "snappy"       # 临时文件压缩格式
+    cleanup_on_startup: true    # 启动时清理残留文件

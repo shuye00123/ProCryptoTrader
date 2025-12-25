@@ -94,6 +94,24 @@ class MonitoringConfig:
 
 
 @dataclass
+class StreamingQueueConfig:
+    """V3.0: 流式磁盘队列配置"""
+    enabled: bool = True              # 是否启用流式磁盘队列
+    temp_dir: str = "data/temp"       # 临时文件目录
+    max_workers: int = 2              # 并行写入线程数
+    compression: str = "snappy"       # 临时文件压缩格式
+    cleanup_on_startup: bool = True   # 启动时清理残留文件
+
+    def __post_init__(self):
+        """验证配置参数"""
+        if self.max_workers < 1 or self.max_workers > 8:
+            raise ValueError("并行写入线程数必须在1-8之间")
+
+        if self.compression not in ["snappy", "gzip", "brotli", "none"]:
+            raise ValueError(f"不支持的压缩算法: {self.compression}")
+
+
+@dataclass
 class TickDataConfig:
     """Tick数据转存配置"""
     # 基础配置
@@ -106,6 +124,7 @@ class TickDataConfig:
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     integrity: IntegrityConfig = field(default_factory=IntegrityConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    streaming_queue: StreamingQueueConfig = field(default_factory=StreamingQueueConfig)  # V3.0新增
 
     def __post_init__(self):
         """验证配置参数"""
@@ -123,6 +142,7 @@ class TickDataConfig:
         performance_config = PerformanceConfig(**tick_config.get('performance', {}))
         integrity_config = IntegrityConfig(**tick_config.get('integrity', {}))
         monitoring_config = MonitoringConfig(**tick_config.get('monitoring', {}))
+        streaming_queue_config = StreamingQueueConfig(**tick_config.get('streaming_queue', {}))  # V3.0新增
 
         return cls(
             enabled=tick_config.get('enabled', True),
@@ -131,7 +151,8 @@ class TickDataConfig:
             buffer=buffer_config,
             performance=performance_config,
             integrity=integrity_config,
-            monitoring=monitoring_config
+            monitoring=monitoring_config,
+            streaming_queue=streaming_queue_config  # V3.0新增
         )
 
     @classmethod
@@ -183,6 +204,13 @@ class TickDataConfig:
                 'enable_metrics': self.monitoring.enable_metrics,
                 'log_level': self.monitoring.log_level,
                 'alert_memory_threshold': self.monitoring.alert_memory_threshold
+            },
+            'streaming_queue': {  # V3.0新增
+                'enabled': self.streaming_queue.enabled,
+                'temp_dir': self.streaming_queue.temp_dir,
+                'max_workers': self.streaming_queue.max_workers,
+                'compression': self.streaming_queue.compression,
+                'cleanup_on_startup': self.streaming_queue.cleanup_on_startup
             }
         }
 
