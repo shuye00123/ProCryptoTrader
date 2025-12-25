@@ -19,6 +19,7 @@
 
 import asyncio
 import time
+import datetime
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -28,7 +29,6 @@ import shutil
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from datetime import timezone
 
 from ..websocket_client import TickerData
 
@@ -208,8 +208,8 @@ class StreamingDiskQueue:
         file_paths = []
         loop = asyncio.get_event_loop()
 
-        # 创建写入任务
-        futures = {}
+        # 创建写入任务列表和映射
+        future_to_symbol = {}
         for symbol, ticks in all_ticks.items():
             if not ticks:
                 continue
@@ -220,16 +220,14 @@ class StreamingDiskQueue:
                 self._write_symbol_to_parquet,
                 symbol, ticks
             )
-            futures[future] = (symbol, ticks)
-
-        # 创建future到symbol的不可变映射（避免迭代时的并发修改问题）
-        future_to_symbol = {f: s for f, (s, _) in futures.items()}
+            future_to_symbol[future] = symbol
 
         # 等待所有写入完成并立即释放内存
-        for future in asyncio.as_completed(future_to_symbol.keys()):
-            symbol = future_to_symbol[future]  # 安全访问不可变映射
+        # asyncio.as_completed() 返回一个异步迭代器，按完成顺序yield Future对象
+        for completed_future in asyncio.as_completed(future_to_symbol.keys()):
+            symbol = future_to_symbol[completed_future]
             try:
-                file_path = await future
+                file_path = await completed_future
                 file_paths.append(file_path)
 
                 # 关键优化: 写完立即清空该交易对的内存
@@ -284,7 +282,7 @@ class StreamingDiskQueue:
             # 流式构建DataFrame
             # 使用字典列表方式，然后转DataFrame
             data_dicts = []
-            created_at = pd.Timestamp.now(tz=timezone.UTC)
+            created_at = pd.Timestamp.now(tz=datetime.timezone.utc)
 
             for tick in ticks:
                 data_dicts.append({
