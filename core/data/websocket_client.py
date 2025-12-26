@@ -1,25 +1,28 @@
 """
 币安WebSocket客户端 - 高频突破策略数据层
 
-基于币安官方API文档实现的全市场Ticker流WebSocket客户端
-文档地址: https://developers.binance.com/docs/zh-CN/derivatives/usds-margined-futures/websocket-market-streams/All-Market-Tickers-Streams
+## 核心问题修复
+问题：服务器每700多秒（约12分钟）断开连接
+原因：处理!ticker@arr消息时阻塞，导致pong无法及时回复
+解决：使用create_task异步处理消息，不阻塞消息循环
 
-实现特性:
-- 自动重连机制
-- 错误处理和容错
-- 数据缓存和处理
-- 多种连接模式支持
+## 原理说明
+1. Binance服务器每3分钟发送ping帧
+2. 如果10分钟内没收到pong，连接断开
+3. websockets库自动处理ping/pong，但需要事件循环不被阻塞
+4. !ticker@arr包含200+个ticker，处理耗时较长
+5. 使用await会阻塞消息循环，导致pong延迟
+6. 使用create_task让消息处理在后台执行，不阻塞recv()
 """
 
 import asyncio
 import json
 import logging
-import time
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional
 from datetime import datetime
 from dataclasses import dataclass
 import websockets
-from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
+from websockets.exceptions import ConnectionClosed
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -29,48 +32,37 @@ TICK_MANAGER = None
 
 
 def set_tick_data_manager(manager):
-    """设置全局Tick数据管理器
-
-    Args:
-        manager: TickDataManager实例
-    """
+    """设置全局Tick数据管理器"""
     global TICK_MANAGER
     TICK_MANAGER = manager
-    logger.info("Tick数据管理器已设置到WebSocket客户端")
 
 
 def get_tick_data_manager():
-    """获取当前设置的Tick数据管理器
-
-    Returns:
-        TickDataManager实例或None
-    """
+    """获取当前设置的Tick数据管理器"""
     return TICK_MANAGER
 
 
 @dataclass
 class TickerData:
-    """Ticker数据结构 - 内存优化版本（使用__slots__）"""
-    symbol: str                # 交易对符号
-    price: float              # 最新价格
-    price_change: float       # 24小时价格变化
-    price_change_percent: float  # 24小时价格变化百分比
-    weighted_avg_price: float # 加权平均价格
-    open_price: float         # 24小时开盘价
-    high_price: float         # 24小时最高价
-    low_price: float          # 24小时最低价
-    volume: float             # 24小时成交量
-    quote_volume: float       # 24小时成交额
-    open_time: int            # 24小时开始时间
-    close_time: int           # 统计截止时间
-    event_time: int           # 🔥 WebSocket事件时间（实时）
-    first_id: int             # 首笔成交id
-    last_id: int              # 末笔成交id
-    count: int                # 24小时内成交数量
-    last_quantity: float      # 🔥 Q字段：最新价格上的成交量
+    """Ticker数据结构"""
+    symbol: str
+    price: float
+    price_change: float
+    price_change_percent: float
+    weighted_avg_price: float
+    open_price: float
+    high_price: float
+    low_price: float
+    volume: float
+    quote_volume: float
+    open_time: int
+    close_time: int
+    event_time: int
+    first_id: int
+    last_id: int
+    count: int
+    last_quantity: float
 
-    # 使用__slots__减少内存开销（约30-40%内存节省）
-    # 对于大量tick数据场景，每个对象节省约60-80字节
     __slots__ = [
         'symbol', 'price', 'price_change', 'price_change_percent',
         'weighted_avg_price', 'open_price', 'high_price', 'low_price',
@@ -82,456 +74,228 @@ class TickerData:
     def from_dict(cls, data: Dict) -> 'TickerData':
         """从字典创建TickerData实例"""
         try:
-
-            # 提取所有时间字段
-            event_time = int(data['E']) if data.get('E') else 0
-
-            final_timestamp = event_time
-
             return cls(
                 symbol=data['s'],
-                price=float(data['c']),                              # 最新价格
-                price_change=float(data['p']) if data.get('p') else 0.0,     # 24小时价格变化 (p字段)
-                price_change_percent=float(data['P']) if data.get('P') else 0.0,  # 24小时价格变化百分比 (P字段)
-                weighted_avg_price=float(data['w']) if data.get('w') else 0.0,  # 24小时加权平均价格 (w字段)
-                open_price=float(data['o']) if data.get('o') else 0.0,           # 24小时开盘价 (o字段)
-                high_price=float(data['h']) if data.get('h') else 0.0,           # 24小时最高价 (h字段)
-                low_price=float(data['l']) if data.get('l') else 0.0,            # 24小时最低价 (l字段)
-                volume=float(data['v']) if data.get('v') else 0.0,               # 24小时成交量 (v字段)
-                quote_volume=float(data['q']) if data.get('q') else 0.0,         # 24小时成交额 (q字段)
-                open_time=int(data['O']) if data.get('O') else 0,               # 统计开始时间 (O字段)
-                close_time=int(data['C']) if data.get('C') else 0,              # 统计截止时间 (C字段)
-                event_time=final_timestamp,                                    # WebSocket事件时间 (E字段)
-                first_id=int(data['F']) if data.get('F') else 0,               # 24小时内第一笔成交交易ID (F字段)
-                last_id=int(data['L']) if data.get('L') else 0,                # 24小时内最后一笔成交交易ID (L字段)
-                count=int(data['n']) if data.get('n') else 0,                  # 24小时内成交数量 (n字段)
-                last_quantity=float(data['Q']) if data.get('Q') else 0.0        # 🔥 Q字段：最新一笔交易的成交量
+                price=float(data['c']),
+                price_change=float(data['p']) if data.get('p') else 0.0,
+                price_change_percent=float(data['P']) if data.get('P') else 0.0,
+                weighted_avg_price=float(data['w']) if data.get('w') else 0.0,
+                open_price=float(data['o']) if data.get('o') else 0.0,
+                high_price=float(data['h']) if data.get('h') else 0.0,
+                low_price=float(data['l']) if data.get('l') else 0.0,
+                volume=float(data['v']) if data.get('v') else 0.0,
+                quote_volume=float(data['q']) if data.get('q') else 0.0,
+                open_time=int(data['O']) if data.get('O') else 0,
+                close_time=int(data['C']) if data.get('C') else 0,
+                event_time=int(data['E']) if data.get('E') else 0,
+                first_id=int(data['F']) if data.get('F') else 0,
+                last_id=int(data['L']) if data.get('L') else 0,
+                count=int(data['n']) if data.get('n') else 0,
+                last_quantity=float(data['Q']) if data.get('Q') else 0.0
             )
         except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"解析Ticker数据失败: {e}, 数据: {data}")
+            logger.error(f"解析Ticker数据失败: {e}")
             return None
 
 
 class BinanceWebSocketClient:
     """币安WebSocket客户端
 
-    专门用于高频突破策略的实时数据获取，支持全市场Ticker流订阅
-
-    Ping/Pong机制说明:
-    - Binance服务器每3分钟发送一个ping帧
-    - websockets库会自动回复pong（当收到ping时）
-    - 我们需要确保消息循环不被阻塞，以便pong能及时发送
+    关键修复：使用create_task处理消息，避免阻塞pong回复
     """
 
     def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5):
-        """
-        初始化WebSocket客户端
-
-        Args:
-            testnet: 是否使用测试网
-            max_reconnects: 最大重连次数
-            reconnect_interval: 重连间隔（秒）
-        """
         self.testnet = testnet
         self.max_reconnects = max_reconnects
         self.reconnect_interval = reconnect_interval
         self.reconnect_count = 0
         self.is_connected = False
         self.is_running = False
+        self._should_reconnect = False
 
-        # WebSocket连接
         self.ws_connection = None
-        self.ws_url = self._get_ws_url()
+        self.ws_url = "wss://stream.binancefuture.com/ws" if testnet else "wss://fstream.binance.com/ws"
 
-        # 回调函数
-        self.ticker_callbacks: List[Callable[[TickerData], None]] = []
-        self.error_callbacks: List[Callable[[Exception], None]] = []
-
-        # 数据缓存
+        self.connection_start_time = None
+        self.ticker_callbacks: List[Callable] = []
+        self.error_callbacks: List[Callable] = []
         self.ticker_cache: Dict[str, TickerData] = {}
-        self.last_update_time: Dict[str, datetime] = {}
 
-        # 统计信息
-        self.stats = {
-            'messages_received': 0,
-            'errors_count': 0,
-            'reconnects_count': 0,
-            'last_message_time': None,
-            'connection_start_time': None,
-            'pings_received': 0,          # 收到的ping次数
-            'pongs_sent': 0,              # 发送的pong次数
-            'last_ping_time': None        # 最后一次ping时间
-        }
+        self.messages_received = 0
+        self.errors_count = 0
+        self._last_recv_time = None
 
-        # 心跳监控任务
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._message_task: Optional[asyncio.Task] = None
-
-    def _get_ws_url(self) -> str:
-        """获取WebSocket URL
-
-        根据币安API文档：
-        - 测试网: wss://stream.binancefuture.com/ws
-        - 正式网: wss://fstream.binance.com/ws
-
-        Returns:
-            WebSocket URL
-        """
-        if self.testnet:
-            url = "wss://stream.binancefuture.com/ws"
-            logger.info(f"使用币安测试网WebSocket URL: {url}")
-        else:
-            url = "wss://fstream.binance.com/ws"
-            logger.info(f"使用币安正式网WebSocket URL: {url}")
-        return url
-
-    def add_ticker_callback(self, callback: Callable[[TickerData], None]):
-        """添加Ticker数据回调函数
-
-        Args:
-            callback: 回调函数，接收TickerData参数
-        """
+    def add_ticker_callback(self, callback: Callable):
         self.ticker_callbacks.append(callback)
-        logger.info(f"添加Ticker回调函数，当前总数: {len(self.ticker_callbacks)}")
 
-    def add_error_callback(self, callback: Callable[[Exception], None]):
-        """添加错误回调函数
-
-        Args:
-            callback: 回调函数，接收Exception参数
-        """
+    def add_error_callback(self, callback: Callable):
         self.error_callbacks.append(callback)
-        logger.info(f"添加错误回调函数，当前总数: {len(self.error_callbacks)}")
 
     async def _call_ticker_callbacks(self, ticker: TickerData):
-        """调用所有Ticker回调函数（异步版本，避免阻塞事件循环）
-
-        关键: 此方法必须是非阻塞的，否则会延迟WebSocket ping/pong响应
-        导致Binance服务器在10分钟后断开连接
-        """
-        # 调用同步回调函数
+        """调用Ticker回调函数"""
         for callback in self.ticker_callbacks:
             try:
                 callback(ticker)
             except Exception as e:
-                logger.error(f"Ticker回调函数执行失败: {e}")
+                logger.error(f"回调失败: {e}")
 
-        # 🔥 集成Tick数据管理器 - 使用异步任务避免阻塞
+        # Tick数据管理器异步处理
         if TICK_MANAGER:
-            try:
-                # 创建后台任务处理tick收集，不阻塞消息循环
-                # 使用fire-and-forget模式，不等待结果
-                asyncio.create_task(TICK_MANAGER.collect_tick(ticker))
-            except Exception as e:
-                logger.error(f"Tick数据收集失败: {e}")
+            asyncio.create_task(TICK_MANAGER.collect_tick(ticker))
 
     def _call_error_callbacks(self, error: Exception):
-        """调用所有错误回调函数"""
+        """调用错误回调函数"""
         for callback in self.error_callbacks:
             try:
                 callback(error)
-            except Exception as e:
-                logger.error(f"错误回调函数执行失败: {e}")
+            except Exception:
+                pass
 
     async def connect_all_ticker(self):
-        """连接全市场Ticker流
-
-        订阅!ticker@arr流，获取所有USDT-M合约的24小时价格变动统计
-        """
+        """连接WebSocket并订阅所有Ticker"""
         try:
-            logger.info(f"正在连接币安WebSocket: {self.ws_url}")
+            logger.info(f"连接WebSocket: {self.ws_url}")
 
-            # 建立WebSocket连接
-            # 使用websockets库的内置ping/pong处理机制
-            # ping_interval=None: 不主动发送ping（Binance不响应客户端ping）
-            # ping_timeout=None: 不设置ping超时（因为我们依赖服务器的ping）
-            # close_timeout: 关闭握手超时时间
+            # 关键：不主动发送ping，让websockets库自动处理服务器的ping
             self.ws_connection = await websockets.connect(
                 self.ws_url,
-                ping_interval=None,    # 禁用客户端主动ping
-                ping_timeout=None,     # 禁用ping超时
-                close_timeout=10,      # 关闭超时10秒
-                max_queue=2**16,       # 消息队列大小65536
-                # 设置ping_handler来显式处理服务器的ping
+                ping_interval=None,    # 不主动发送ping
+                ping_timeout=None,     # 不设置ping超时
+                close_timeout=10,
+                max_queue=2**16,
             )
 
             self.is_connected = True
-            self.reconnect_count = 0  # 连接成功后重置重连计数
-            self.stats['connection_start_time'] = datetime.now()
-            self.stats['total_reconnects'] = self.stats.get('total_reconnects', 0)  # 累计重连次数（不重置）
-
+            self.connection_start_time = datetime.now()
+            self.reconnect_count = 0
             logger.info("WebSocket连接成功")
 
-            # 发送订阅消息
             await self._subscribe_all_ticker()
-
-            # 先启动消息处理循环，让它开始接收数据
-            self._message_task = asyncio.create_task(self._message_loop())
-
-            # 等待一小段时间，确保消息循环已经开始接收到数据
-            # 然后再启动心跳监控任务
-            await asyncio.sleep(1)
-
-            # 现在启动心跳监控任务
-            if self.is_connected and self.is_running:
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
-                logger.info("心跳监控任务已启动")
-
-            # 等待消息循环结束
-            await self._message_task
+            await self._message_loop()
 
         except Exception as e:
-            logger.error(f"WebSocket连接失败: {e}")
+            logger.error(f"连接失败: {e}")
             self.is_connected = False
             await self._handle_connection_error(e)
 
     async def _subscribe_all_ticker(self):
-        """订阅全市场Ticker流"""
-        subscribe_msg = {
-            "method": "SUBSCRIBE",
-            "params": ["!ticker@arr"],
-            "id": 1
-        }
-
+        """订阅所有Ticker数据"""
+        subscribe_msg = {"method": "SUBSCRIBE", "params": ["!ticker@arr"], "id": 1}
         try:
             await self.ws_connection.send(json.dumps(subscribe_msg))
-            logger.info("已发送全市场Ticker订阅请求")
-
-            # 等待订阅确认
             response = await asyncio.wait_for(self.ws_connection.recv(), timeout=10)
             response_data = json.loads(response)
-
             if response_data.get('id') == 1 and response_data.get('result') is None:
-                logger.info("全市场Ticker订阅成功")
-            else:
-                logger.warning(f"订阅响应异常: {response_data}")
-
-        except asyncio.TimeoutError:
-            logger.error("订阅超时")
+                logger.info("订阅成功")
         except Exception as e:
             logger.error(f"订阅失败: {e}")
-
-    async def _heartbeat_monitor(self):
-        """心跳监控任务
-
-        定期检查连接状态，确保WebSocket连接活跃
-        每30秒检查一次，如果超过5分钟没有收到任何数据，记录警告
-        """
-        logger.info(f"启动心跳监控任务 - is_running={self.is_running}, is_connected={self.is_connected}")
-
-        while self.is_running and self.is_connected:
-            try:
-                logger.debug(f"心跳监控循环 - is_running={self.is_running}, is_connected={self.is_connected}")
-                await asyncio.sleep(30)  # 每30秒检查一次
-
-                if not self.is_connected:
-                    logger.info("心跳监控: is_connected变为False，退出循环")
-                    break
-
-                now = datetime.now()
-                last_msg_time = self.stats.get('last_message_time')
-
-                if last_msg_time:
-                    silence_duration = (now - last_msg_time).total_seconds()
-
-                    # 记录连接状态
-                    logger.info(
-                        f"WebSocket心跳检查 - "
-                        f"连接活跃时长: {(now - self.stats['connection_start_time']).total_seconds():.0f}秒, "
-                        f"距最后消息: {silence_duration:.0f}秒, "
-                        f"已接收消息: {self.stats['messages_received']}条"
-                    )
-
-                    # 如果超过5分钟没有收到任何消息，记录警告
-                    if silence_duration > 300:
-                        logger.warning(
-                            f"长时间未收到数据 ({silence_duration:.0f}秒)，"
-                            f"可能连接已断开"
-                        )
-
-                        # 尝试发送ping来检测连接（注意：Binance可能不响应）
-                        try:
-                            await asyncio.wait_for(
-                                self.ws_connection.ping(),
-                                timeout=5
-                            )
-                            logger.info("Ping发送成功，连接正常")
-                        except asyncio.TimeoutError:
-                            logger.warning("Ping超时，连接可能已断开")
-                            self.is_connected = False
-                        except Exception as e:
-                            logger.error(f"Ping失败: {e}")
-                            self.is_connected = False
-                else:
-                    logger.info(f"心跳监控: 尚未收到任何消息，已运行:{(now - self.stats['connection_start_time']).total_seconds():.0f}秒")
-
-            except asyncio.CancelledError:
-                logger.info("心跳监控任务被取消")
-                break
-            except Exception as e:
-                logger.error(f"心跳监控异常: {e}")
-
-        logger.info(f"心跳监控任务结束 - is_running={self.is_running}, is_connected={self.is_connected}")
 
     async def _message_loop(self):
         """消息处理循环"""
         self.is_running = True
-        logger.info(f"开始消息处理循环 - is_running={self.is_running}, is_connected={self.is_connected}")
+        self._should_reconnect = False
+        self._last_recv_time = datetime.now()
+        logger.info("开始消息处理循环")
 
         try:
             while self.is_running and self.is_connected:
-                try:
-                    logger.debug(f"等待接收消息... is_connected={self.is_connected}")
-                    # 接收消息 (不设置超时，依赖Binance服务器的ping/pong机制)
-                    message = await self.ws_connection.recv()
-                    logger.debug(f"收到消息，长度: {len(message) if message else 0}")
+                # 10分钟静默检测
+                if (datetime.now() - self._last_recv_time).total_seconds() > 600:
+                    logger.warning("10分钟未收到数据，可能连接已断开")
+                    self._should_reconnect = True
+                    break
 
-                    # 处理消息
-                    await self._handle_message(message)
+                # 接收消息
+                message = await self.ws_connection.recv()
+                self._last_recv_time = datetime.now()
+                self.messages_received += 1
 
-                except asyncio.TimeoutError:
-                    # 不应该发生，因为已经移除了 wait_for 的超时
-                    logger.warning("接收消息超时")
-                    continue
+                # 定期输出连接状态（每1000条消息）
+                if self.messages_received % 1000 == 0:
+                    if self.connection_start_time:
+                        duration = (datetime.now() - self.connection_start_time).total_seconds()
+                        logger.info(f"📊 已接收消息: {self.messages_received}条, "
+                                   f"连接时长: {duration:.0f}秒")
+
+                # 🔥 关键修复：使用create_task避免阻塞
+                # 让websockets库能继续处理服务器的ping帧并自动回复pong
+                asyncio.create_task(self._handle_message(message))
 
         except ConnectionClosed as e:
-            logger.warning(f"WebSocket连接关闭: {e}")
+            logger.info(f"连接关闭: {e}")
             self.is_connected = False
-            await self._handle_connection_error(e)
-
         except Exception as e:
-            logger.error(f"消息处理循环异常: {e}")
+            logger.error(f"消息循环异常: {e}")
             self.is_connected = False
-            await self._handle_connection_error(e)
-
         finally:
             self.is_running = False
-            logger.info(f"消息处理循环结束 - is_running={self.is_running}, is_connected={self.is_connected}")
+            if self._should_reconnect or not self.is_connected:
+                await self._handle_connection_error(Exception("需要重连"))
 
     async def _handle_message(self, message: str):
-        """处理WebSocket消息
-
-        Args:
-            message: 接收到的JSON消息
-        """
+        """处理WebSocket消息（后台任务，不阻塞主循环）"""
         try:
             data = json.loads(message)
-            self.stats['messages_received'] += 1
-            self.stats['last_message_time'] = datetime.now()
 
             # 处理不同类型的消息
             if isinstance(data, list):
-                # 全市场Ticker数据 (array)
+                # !ticker@arr 返回的ticker数组
                 await self._process_ticker_array(data)
             elif isinstance(data, dict):
-                # 单个消息处理
                 await self._process_single_message(data)
-            else:
-                logger.debug(f"未知消息类型: {type(data)}")
 
         except json.JSONDecodeError as e:
             logger.error(f"JSON解析失败: {e}")
-            self.stats['errors_count'] += 1
+            self.errors_count += 1
         except Exception as e:
             logger.error(f"消息处理失败: {e}")
-            self.stats['errors_count'] += 1
+            self.errors_count += 1
 
     async def _process_ticker_array(self, ticker_array: List[Dict]):
-        """处理Ticker数组数据
-
-        Args:
-            ticker_array: Ticker数据数组
-        """
+        """处理Ticker数组（!ticker@arr）"""
         for ticker_data in ticker_array:
             ticker = TickerData.from_dict(ticker_data)
             if ticker:
-                # 更新缓存
                 self.ticker_cache[ticker.symbol] = ticker
-                self.last_update_time[ticker.symbol] = datetime.now()
-
-                # 异步调用回调函数（避免阻塞消息循环）
                 await self._call_ticker_callbacks(ticker)
 
     async def _process_single_message(self, data: Dict):
-        """处理单个消息
-
-        Args:
-            data: 消息数据
-        """
-        # 处理订阅确认等消息
+        """处理单个消息"""
         if 'id' in data:
+            # 订阅响应
             logger.debug(f"收到响应消息: {data}")
         elif 'error' in data:
             logger.error(f"收到错误消息: {data['error']}")
-            self.stats['errors_count'] += 1
+            self.errors_count += 1
         elif 'e' in data and data['e'] == '24hrTicker':
-            # 处理单个交易对的Ticker数据 (币安期货格式)
+            # 单个ticker数据
             ticker = TickerData.from_dict(data)
             if ticker:
-                # 更新缓存
                 self.ticker_cache[ticker.symbol] = ticker
-                self.last_update_time[ticker.symbol] = datetime.now()
-
-                # 异步调用回调函数（避免阻塞消息循环）
                 await self._call_ticker_callbacks(ticker)
-                logger.debug(f"处理单个Ticker数据: {ticker.symbol}")
         elif 'stream' in data and 'data' in data:
-            # 处理包装格式的Ticker数据 (币安现货格式)
+            # 流式ticker数据
             ticker_data = data['data']
             ticker = TickerData.from_dict(ticker_data)
             if ticker:
-                # 更新缓存
                 self.ticker_cache[ticker.symbol] = ticker
-                self.last_update_time[ticker.symbol] = datetime.now()
-
-                # 异步调用回调函数（避免阻塞消息循环）
                 await self._call_ticker_callbacks(ticker)
-                logger.debug(f"处理单个Ticker数据: {ticker.symbol}")
         else:
-            logger.info(f"未处理的消息: {data}")
+            logger.debug(f"未处理的消息类型: {data}")
 
     async def _handle_connection_error(self, error: Exception):
-        """处理连接错误
-
-        Args:
-            error: 错误信息
-        """
-        self.stats['errors_count'] += 1
-
-        # 判断错误类型
-        error_type = type(error).__name__
-        if "no close frame" in str(error):
-            logger.warning(f"连接异常断开: {error}")
-        else:
-            logger.error(f"连接错误: {error}")
+        """处理连接错误"""
+        self.errors_count += 1
+        logger.warning(f"连接错误: {error}")
 
         # 调用错误回调
         self._call_error_callbacks(error)
 
-        # 清理旧的后台任务
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            self._heartbeat_task = None
-
-        if self._message_task and not self._message_task.done():
-            self._message_task.cancel()
-            try:
-                await self._message_task
-            except asyncio.CancelledError:
-                pass
-            self._message_task = None
-
         # 尝试重连
         if self.reconnect_count < self.max_reconnects:
             self.reconnect_count += 1
-            self.stats['reconnects_count'] = self.reconnect_count
-            self.stats['total_reconnects'] = self.stats.get('total_reconnects', 0) + 1
 
-            # 指数退避：每次重连间隔增加
+            # 指数退避
             backoff_interval = min(self.reconnect_interval * (1.5 ** (self.reconnect_count - 1)), 60)
 
             logger.info(f"尝试重连 ({self.reconnect_count}/{self.max_reconnects}), "
@@ -554,22 +318,6 @@ class BinanceWebSocketClient:
         self.is_running = False
         self.is_connected = False
 
-        # 取消心跳监控任务
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                logger.info("心跳监控任务已取消")
-
-        # 取消消息循环任务
-        if self._message_task and not self._message_task.done():
-            self._message_task.cancel()
-            try:
-                await self._message_task
-            except asyncio.CancelledError:
-                logger.info("消息循环任务已取消")
-
         if self.ws_connection:
             try:
                 await self.ws_connection.close()
@@ -578,43 +326,26 @@ class BinanceWebSocketClient:
                 logger.error(f"关闭连接时出错: {e}")
 
     def get_ticker(self, symbol: str) -> Optional[TickerData]:
-        """获取指定交易对的最新Ticker数据
-
-        Args:
-            symbol: 交易对符号
-
-        Returns:
-            TickerData实例，如果不存在返回None
-        """
+        """获取指定交易对的最新Ticker数据"""
         return self.ticker_cache.get(symbol)
 
     def get_all_tickers(self) -> Dict[str, TickerData]:
-        """获取所有缓存的Ticker数据
-
-        Returns:
-            所有Ticker数据的字典
-        """
+        """获取所有缓存的Ticker数据"""
         return self.ticker_cache.copy()
 
     def get_stats(self) -> Dict:
-        """获取连接统计信息
+        """获取连接统计信息"""
+        stats = {
+            'is_connected': self.is_connected,
+            'is_running': self.is_running,
+            'messages_received': self.messages_received,
+            'errors_count': self.errors_count,
+            'reconnect_count': self.reconnect_count,
+            'cached_symbols_count': len(self.ticker_cache),
+        }
 
-        Returns:
-            统计信息字典
-        """
-        stats = self.stats.copy()
-
-        # 添加连接时长
-        if stats['connection_start_time']:
-            stats['connection_duration'] = (
-                datetime.now() - stats['connection_start_time']
-            ).total_seconds()
-
-        # 添加当前状态
-        stats['is_connected'] = self.is_connected
-        stats['is_running'] = self.is_running
-        stats['reconnect_count'] = self.reconnect_count
-        stats['cached_symbols_count'] = len(self.ticker_cache)
+        if self.connection_start_time:
+            stats['connection_duration'] = (datetime.now() - self.connection_start_time).total_seconds()
 
         return stats
 
@@ -632,16 +363,7 @@ class BinanceWebSocketClient:
 async def create_binance_ws_client(testnet: bool = True,
                                  ticker_callback: Optional[Callable[[TickerData], None]] = None,
                                  error_callback: Optional[Callable[[Exception], None]] = None) -> BinanceWebSocketClient:
-    """创建并配置币安WebSocket客户端
-
-    Args:
-        testnet: 是否使用测试网
-        ticker_callback: Ticker数据回调函数
-        error_callback: 错误回调函数
-
-    Returns:
-        配置好的WebSocket客户端
-    """
+    """创建并配置币安WebSocket客户端"""
     client = BinanceWebSocketClient(testnet=testnet)
 
     if ticker_callback:
@@ -655,17 +377,13 @@ async def create_binance_ws_client(testnet: bool = True,
 # 示例使用
 async def example_usage():
     """示例用法"""
-
     def ticker_handler(ticker: TickerData):
-        """Ticker数据处理函数"""
         if ticker.symbol in ['BTCUSDT', 'ETHUSDT']:
             logger.info(f"{ticker.symbol}: ${ticker.price} ({ticker.price_change_percent:+.2f}%)")
 
     def error_handler(error: Exception):
-        """错误处理函数"""
         logger.error(f"WebSocket错误: {error}")
 
-    # 创建客户端
     client = await create_binance_ws_client(
         testnet=True,
         ticker_callback=ticker_handler,
@@ -673,23 +391,17 @@ async def example_usage():
     )
 
     try:
-        # 运行60秒
         await asyncio.sleep(60)
     finally:
-        # 断开连接
         await client.disconnect()
 
-    # 打印统计信息
     stats = client.get_stats()
     logger.info(f"统计信息: {stats}")
 
 
 if __name__ == "__main__":
-    # 配置日志
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-
-    # 运行示例
     asyncio.run(example_usage())
