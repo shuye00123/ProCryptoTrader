@@ -153,30 +153,35 @@ class BinanceWebSocketClient:
 
     async def connect_all_ticker(self):
         """连接WebSocket并订阅所有Ticker"""
-        try:
-            logger.info(f"连接WebSocket: {self.ws_url}")
+        logger.info(f"连接WebSocket: {self.ws_url}")
 
-            # 关键：不主动发送ping，让websockets库自动处理服务器的ping
-            self.ws_connection = await websockets.connect(
-                self.ws_url,
-                ping_interval=None,    # 不主动发送ping
-                ping_timeout=None,     # 不设置ping超时
-                close_timeout=10,
-                max_queue=2**16,
-            )
+        # 关闭旧连接
+        if self.ws_connection:
+            try:
+                await self.ws_connection.close()
+            except Exception:
+                pass
+            self.ws_connection = None
 
-            self.is_connected = True
-            self.connection_start_time = datetime.now()
-            self.reconnect_count = 0
+        # 关键：不主动发送ping，让websockets库自动处理服务器的ping
+        self.ws_connection = await websockets.connect(
+            self.ws_url,
+            ping_interval=None,    # 不主动发送ping
+            ping_timeout=None,     # 不设置ping超时
+            close_timeout=10,
+            max_queue=2**16,
+        )
+
+        self.is_connected = True
+        self.connection_start_time = datetime.now()
+        # 连接成功后重置重连计数
+        if self.reconnect_count == 0:
             logger.info("WebSocket连接成功")
+        else:
+            logger.info(f"WebSocket重连成功 (第{self.reconnect_count}次)")
 
-            await self._subscribe_all_ticker()
-            await self._message_loop()
-
-        except Exception as e:
-            logger.error(f"连接失败: {e}")
-            self.is_connected = False
-            await self._handle_connection_error(e)
+        await self._subscribe_all_ticker()
+        await self._message_loop()
 
     async def _subscribe_all_ticker(self):
         """订阅所有Ticker数据"""
@@ -224,13 +229,16 @@ class BinanceWebSocketClient:
         except ConnectionClosed as e:
             logger.info(f"连接关闭: {e}")
             self.is_connected = False
+            await self._handle_connection_error(e)
         except Exception as e:
             logger.error(f"消息循环异常: {e}")
             self.is_connected = False
+            await self._handle_connection_error(e)
         finally:
             self.is_running = False
-            if self._should_reconnect or not self.is_connected:
-                await self._handle_connection_error(Exception("需要重连"))
+            # 如果需要重连，启动重连循环
+            if not self.is_connected and self.reconnect_count < self.max_reconnects:
+                await self._reconnect_loop()
 
     async def _handle_message(self, message: str):
         """处理WebSocket消息（后台任务，不阻塞主循环）"""
@@ -291,8 +299,9 @@ class BinanceWebSocketClient:
         # 调用错误回调
         self._call_error_callbacks(error)
 
-        # 尝试重连
-        if self.reconnect_count < self.max_reconnects:
+    async def _reconnect_loop(self):
+        """重连循环（非递归）"""
+        while self.reconnect_count < self.max_reconnects:
             self.reconnect_count += 1
 
             # 指数退避
@@ -303,13 +312,22 @@ class BinanceWebSocketClient:
             await asyncio.sleep(backoff_interval)
 
             try:
+                # 关闭旧连接
+                if self.ws_connection:
+                    try:
+                        await self.ws_connection.close()
+                    except Exception:
+                        pass
+                    self.ws_connection = None
+
                 await self.connect_all_ticker()
+                return  # 连接成功，退出重连循环
+
             except Exception as e:
                 logger.error(f"重连失败: {e}")
-                await self._handle_connection_error(e)
-        else:
-            logger.error(f"达到最大重连次数 ({self.max_reconnects})，停止重连")
-            self.is_running = False
+                self._call_error_callbacks(e)
+
+        logger.error(f"达到最大重连次数 ({self.max_reconnects})，停止重连")
 
     async def disconnect(self):
         """断开WebSocket连接"""
