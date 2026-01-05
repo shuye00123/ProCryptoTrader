@@ -109,15 +109,18 @@ class BinanceWebSocketClient:
     - 使用multiplex_socket订阅完整24hrTicker数据
     - 完整ticker数据支持所有高频突破算法的字段需求
     - 自动重连机制
+    - 交易对列表缓存，定期刷新（默认7天）
     - 保持原有接口兼容性
 
     Attributes:
         quote_asset: 要订阅的报价资产（如 'USDT', 'BUSD'）
         subscribed_symbols: 当前订阅的交易对列表
+        symbols_cache_ttl: 交易对缓存有效期（天），默认7天
+        _symbols_last_update: 交易对列表上次更新时间
     """
 
     def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5,
-                 quote_asset: str = 'USDT'):
+                 quote_asset: str = 'USDT', symbols_cache_ttl_days: int = 7):
         # 连接配置
         self.testnet = testnet
         self.max_reconnects = max_reconnects
@@ -127,6 +130,10 @@ class BinanceWebSocketClient:
         self.is_running = False
         self._should_reconnect = False
         self.quote_asset = quote_asset.upper()  # 默认订阅 USDT 交易对
+
+        # 交易对缓存配置
+        self.symbols_cache_ttl = symbols_cache_ttl_days * 86400  # 转换为秒
+        self._symbols_last_update: Optional[datetime] = None
 
         # python-binance 组件
         self._client: Optional[AsyncClient] = None      # AsyncClient实例
@@ -183,11 +190,28 @@ class BinanceWebSocketClient:
             except Exception:
                 pass
 
+    def _is_symbols_cache_expired(self) -> bool:
+        """检查交易对缓存是否已过期
+
+        Returns:
+            bool: True 表示缓存已过期或不存在，需要重新获取
+        """
+        if self._symbols_last_update is None:
+            return True
+
+        elapsed = (datetime.now() - self._symbols_last_update).total_seconds()
+        is_expired = elapsed > self.symbols_cache_ttl
+
+        if is_expired:
+            logger.info(f"交易对缓存已过期 (上次更新: {elapsed / 86400:.1f} 天前)")
+
+        return is_expired
+
     async def _get_quote_asset_symbols(self) -> List[str]:
         """获取指定报价资产的所有交易对
 
         使用 get_exchange_info() 获取交易所信息，然后过滤出指定报价资产
-        （如 USDT）的交易对。
+        （如 USDT）的交易对。获取成功后会更新缓存时间戳。
 
         Returns:
             List[str]: 交易对符号列表，如 ['BTCUSDT', 'ETHUSDT', ...]
@@ -196,7 +220,7 @@ class BinanceWebSocketClient:
             if not self._client:
                 raise RuntimeError("AsyncClient 未初始化")
 
-            logger.info(f"正在获取 {self.quote_asset} 交易对列表...")
+            logger.info(f"正在从 Binance 获取 {self.quote_asset} 交易对列表...")
             exchange_info = await self._client.get_exchange_info()
 
             # 过滤出指定报价资产的交易对
@@ -207,7 +231,10 @@ class BinanceWebSocketClient:
                     symbol_info.get('quoteAsset') == self.quote_asset):
                     symbols.append(symbol_info['symbol'])
 
-            logger.info(f"找到 {len(symbols)} 个 {self.quote_asset} 交易对")
+            # 更新缓存时间戳
+            self._symbols_last_update = datetime.now()
+            ttl_days = self.symbols_cache_ttl / 86400
+            logger.info(f"找到 {len(symbols)} 个 {self.quote_asset} 交易对，缓存有效期 {ttl_days:.0f} 天")
             return symbols
 
         except BinanceAPIException as e:
@@ -217,15 +244,31 @@ class BinanceWebSocketClient:
             logger.error(f"获取交易对列表时发生错误: {e}")
             return []
 
+    async def _get_or_refresh_symbols(self) -> List[str]:
+        """获取交易对列表，优先使用缓存
+
+        Returns:
+            List[str]: 交易对符号列表
+        """
+        if self.subscribed_symbols and not self._is_symbols_cache_expired():
+            logger.info(f"使用缓存的交易对列表: {len(self.subscribed_symbols)} 个 {self.quote_asset} 交易对")
+            return self.subscribed_symbols
+
+        # 缓存过期或不存在，重新获取
+        return await self._get_quote_asset_symbols()
+
     async def connect_all_ticker(self):
         """连接WebSocket并订阅指定报价资产的所有Ticker（完整24hrTicker数据）
 
         工作流程:
         1. 创建 AsyncClient 连接
-        2. 调用 get_exchange_info() 获取所有交易对
-        3. 过滤出指定报价资产（如 USDT）的交易对
-        4. 使用 multiplex_socket 订阅所有这些交易对的 ticker 流
-        5. 启动消息处理循环
+        2. 检查交易对缓存是否过期，过期则调用 get_exchange_info() 刷新
+        3. 使用 multiplex_socket 订阅所有这些交易对的 ticker 流
+        4. 启动消息处理循环
+
+        缓存策略:
+        - 交易对列表缓存默认7天，可配置
+        - 重连时优先使用缓存，避免频繁调用 API
         """
         try:
             logger.info(f"连接WebSocket: python-binance SDK (testnet={self.testnet})")
@@ -246,8 +289,8 @@ class BinanceWebSocketClient:
                 user_timeout=60  # 连接超时设置
             )
 
-            # 获取指定报价资产的所有交易对
-            self.subscribed_symbols = await self._get_quote_asset_symbols()
+            # 获取交易对列表（优先使用缓存）
+            self.subscribed_symbols = await self._get_or_refresh_symbols()
 
             if not self.subscribed_symbols:
                 logger.warning(f"未找到任何 {self.quote_asset} 交易对，使用备用方案")
@@ -506,7 +549,8 @@ class BinanceWebSocketClient:
 async def create_binance_ws_client(testnet: bool = True,
                                  ticker_callback: Optional[Callable[[TickerData], None]] = None,
                                  error_callback: Optional[Callable[[Exception], None]] = None,
-                                 quote_asset: str = 'USDT') -> BinanceWebSocketClient:
+                                 quote_asset: str = 'USDT',
+                                 symbols_cache_ttl_days: int = 7) -> BinanceWebSocketClient:
     """创建并配置币安WebSocket客户端
 
     Args:
@@ -514,11 +558,16 @@ async def create_binance_ws_client(testnet: bool = True,
         ticker_callback: Ticker数据回调函数
         error_callback: 错误回调函数
         quote_asset: 要订阅的报价资产，默认 'USDT'（如 'BUSD', 'USDC' 等）
+        symbols_cache_ttl_days: 交易对缓存有效期（天），默认7天
 
     Returns:
         BinanceWebSocketClient: 配置好的WebSocket客户端
     """
-    client = BinanceWebSocketClient(testnet=testnet, quote_asset=quote_asset)
+    client = BinanceWebSocketClient(
+        testnet=testnet,
+        quote_asset=quote_asset,
+        symbols_cache_ttl_days=symbols_cache_ttl_days
+    )
 
     if ticker_callback:
         client.add_ticker_callback(ticker_callback)
