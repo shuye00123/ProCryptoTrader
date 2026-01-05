@@ -557,6 +557,80 @@ class BinanceAPI(BaseExchange):
             logger.error(f"获取行情信息异常: {e}")
             return {'error': str(e)}
 
+    def get_trades(self, symbol: str, since: Optional[int] = None,
+                  limit: Optional[int] = None, params: Optional[Dict] = None) -> List[Dict]:
+        """
+        获取最近成交记录（同步版本，使用ccxt）
+
+        Args:
+            symbol: 交易对
+            since: 开始时间戳（毫秒）
+            limit: 限制数量
+            params: 额外参数
+
+        Returns:
+            成交记录列表
+        """
+        try:
+            if params is None:
+                params = {}
+
+            trades = self.exchange.fetch_trades(symbol, since, limit, params)
+
+            return [{
+                'id': trade.get('id', ''),
+                'symbol': trade.get('symbol', ''),
+                'side': trade.get('side', ''),
+                'amount': trade.get('amount', 0),
+                'price': trade.get('price', 0),
+                'timestamp': trade.get('timestamp', 0),
+                'datetime': trade.get('datetime', ''),
+                'fee': trade.get('fee', {}),
+                'info': trade.get('info', {})
+            } for trade in trades]
+        except Exception as e:
+            logger.error(f"获取成交记录时出错: {e}")
+            return [{'error': str(e)}]
+
+    async def get_trades_async(self, symbol: str, since: Optional[int] = None,
+                              limit: Optional[int] = None, params: Optional[Dict] = None) -> List[Dict]:
+        """
+        获取最近成交记录（异步版本，使用python-binance）
+
+        Args:
+            symbol: 交易对
+            since: 开始时间戳（毫秒）
+            limit: 限制数量
+            params: 额外参数
+
+        Returns:
+            成交记录列表
+        """
+        try:
+            client = await self._get_async_client()
+
+            binance_symbol = symbol.replace('/', '').upper()
+
+            result = await client.get_recent_trades(symbol=binance_symbol, limit=limit)
+
+            return [{
+                'id': str(trade.get('id', '')),
+                'symbol': symbol,
+                'side': 'buy' if trade.get('isBuyerMaker', False) else 'sell',
+                'amount': float(trade.get('qty', 0)),
+                'price': float(trade.get('price', 0)),
+                'timestamp': trade.get('time', 0),
+                'datetime': datetime.fromtimestamp(trade.get('time', 0) / 1000).isoformat() if trade.get('time') else '',
+                'info': trade
+            } for trade in result]
+
+        except BinanceAPIException as e:
+            logger.error(f"获取成交记录时出错: {e}")
+            return [{'error': str(e)}]
+        except Exception as e:
+            logger.error(f"获取成交记录异常: {e}")
+            return [{'error': str(e)}]
+
     def get_orderbook(self, symbol: str, limit: int = None, params: Optional[Dict] = None) -> Dict:
         """
         获取订单簿
