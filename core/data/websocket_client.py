@@ -145,11 +145,14 @@ class BinanceWebSocketClient:
 
     async def _call_ticker_callbacks(self, ticker: TickerData):
         """调用Ticker回调函数"""
-        for callback in self.ticker_callbacks:
+        logger.debug(f"调用ticker回调: {ticker.symbol}, 回调数量: {len(self.ticker_callbacks)}")
+        for i, callback in enumerate(self.ticker_callbacks):
             try:
+                logger.debug(f"执行回调 #{i}: {callback.__name__ if hasattr(callback, '__name__') else 'unknown'}")
                 callback(ticker)
+                logger.debug(f"回调 #{i} 执行成功")
             except Exception as e:
-                logger.error(f"回调失败: {e}")
+                logger.error(f"回调 #{i} 失败: {e}")
 
         # Tick数据管理器异步处理
         if TICK_MANAGER:
@@ -184,8 +187,10 @@ class BinanceWebSocketClient:
                 user_timeout=60  # 连接超时设置
             )
 
-            # 获取 ticker socket（等效于 !ticker@arr 全市场订阅）
-            self._ts = self._bm.ticker_socket()
+            # 获取 mini ticker socket（支持async/await方式，每秒更新）
+            # 注意：ticker_socket() 需要回调函数参数，不适合async/await方式
+            # miniticker_socket() 返回所有mini ticker数据，更新频率更高（默认1秒）
+            self._ts = self._bm.miniticker_socket()
 
             self.is_connected = True
             self.connection_start_time = datetime.now()
@@ -260,15 +265,16 @@ class BinanceWebSocketClient:
         TickerData.from_dict()可以直接使用。
         """
         try:
-            # python-binance已经解析为字典
-            data = message if isinstance(message, dict) else {}
+            # 添加调试日志
+            logger.debug(f"收到消息类型: {type(message)}, 内容预览: {str(message)[:200]}")
 
-            # 处理不同类型的消息
-            if isinstance(data, list):
+            # 处理不同类型的消息 - 修复：直接检查message类型
+            if isinstance(message, list):
                 # !ticker@arr 返回的ticker数组
-                await self._process_ticker_array(data)
-            elif isinstance(data, dict):
-                await self._process_single_message(data)
+                logger.debug(f"收到ticker数组，共 {len(message)} 个交易对")
+                await self._process_ticker_array(message)
+            elif isinstance(message, dict):
+                await self._process_single_message(message)
 
         except Exception as e:
             logger.error(f"消息处理失败: {e}")
@@ -276,25 +282,40 @@ class BinanceWebSocketClient:
 
     async def _process_ticker_array(self, ticker_array: List[Dict]):
         """处理Ticker数组（!ticker@arr）"""
+        logger.debug(f"开始处理ticker数组，回调数量: {len(self.ticker_callbacks)}")
         for ticker_data in ticker_array:
             ticker = TickerData.from_dict(ticker_data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
+            else:
+                logger.warning(f"TickerData.from_dict返回None: {ticker_data}")
 
     async def _process_single_message(self, data: Dict):
         """处理单个消息"""
-        if 'e' in data and data['e'] == '24hrTicker':
-            # 单个ticker数据（24小时ticker）
+        event_type = data.get('e', '')
+
+        if event_type == '24hrMiniTicker':
+            # Mini ticker数据（来自miniticker_socket）
             ticker = TickerData.from_dict(data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
-        elif 'e' in data and data['e'] == 'error':
+            else:
+                logger.debug(f"MiniTicker解析失败: {data}")
+        elif event_type == '24hrTicker':
+            # 完整ticker数据（24小时ticker）
+            ticker = TickerData.from_dict(data)
+            if ticker:
+                self.ticker_cache[ticker.symbol] = ticker
+                await self._call_ticker_callbacks(ticker)
+        elif event_type == 'error':
             # 错误消息
             logger.error(f"收到错误消息: {data}")
             self.errors_count += 1
-        # 忽略其他类型的消息
+        else:
+            # 其他类型的消息
+            logger.debug(f"忽略事件类型: {event_type}, 数据: {data}")
 
     async def _handle_connection_error(self, error: Exception):
         """处理连接错误"""
