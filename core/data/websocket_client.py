@@ -3,12 +3,18 @@
 
 ## 核心功能
 - 使用python-binance的AsyncClient和BinanceSocketManager
-- 订阅全市场ticker数据（!ticker@arr）
+- 自动获取指定报价资产（如USDT）的所有交易对
+- 使用multiplex_socket订阅完整24hrTicker数据（包含所有突破算法需要的字段）
 - 自动重连和错误处理
 - 保持原有接口兼容性
 
+## 数据格式支持
+- 24hrTicker: 完整ticker数据，包含 p, P, w, n, Q 等字段
+- 24hrMiniTicker: 简化ticker数据（备用方案）
+
 ## 迁移说明
 从websockets库迁移到python-binance SDK，提供更稳定的连接和官方支持。
+从miniticker升级到完整ticker数据，支持所有高频突破算法。
 """
 
 import asyncio
@@ -99,12 +105,19 @@ class BinanceWebSocketClient:
     """币安WebSocket客户端 - 基于python-binance SDK
 
     使用AsyncClient和BinanceSocketManager实现：
-    - 全市场ticker订阅
+    - 自动获取指定报价资产（如USDT）的所有交易对
+    - 使用multiplex_socket订阅完整24hrTicker数据
+    - 完整ticker数据支持所有高频突破算法的字段需求
     - 自动重连机制
     - 保持原有接口兼容性
+
+    Attributes:
+        quote_asset: 要订阅的报价资产（如 'USDT', 'BUSD'）
+        subscribed_symbols: 当前订阅的交易对列表
     """
 
-    def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5):
+    def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5,
+                 quote_asset: str = 'USDT'):
         # 连接配置
         self.testnet = testnet
         self.max_reconnects = max_reconnects
@@ -113,12 +126,16 @@ class BinanceWebSocketClient:
         self.is_connected = False
         self.is_running = False
         self._should_reconnect = False
+        self.quote_asset = quote_asset.upper()  # 默认订阅 USDT 交易对
 
         # python-binance 组件
         self._client: Optional[AsyncClient] = None      # AsyncClient实例
         self._bm: Optional[BinanceSocketManager] = None # BinanceSocketManager实例
         self._ts = None                                 # Ticker socket
         self._ts_context = None                         # Socket上下文
+
+        # 订阅的交易对列表
+        self.subscribed_symbols: List[str] = []
 
         # 兼容性：保留原有属性名
         self.ws_connection = None
@@ -166,8 +183,50 @@ class BinanceWebSocketClient:
             except Exception:
                 pass
 
+    async def _get_quote_asset_symbols(self) -> List[str]:
+        """获取指定报价资产的所有交易对
+
+        使用 get_exchange_info() 获取交易所信息，然后过滤出指定报价资产
+        （如 USDT）的交易对。
+
+        Returns:
+            List[str]: 交易对符号列表，如 ['BTCUSDT', 'ETHUSDT', ...]
+        """
+        try:
+            if not self._client:
+                raise RuntimeError("AsyncClient 未初始化")
+
+            logger.info(f"正在获取 {self.quote_asset} 交易对列表...")
+            exchange_info = await self._client.get_exchange_info()
+
+            # 过滤出指定报价资产的交易对
+            symbols = []
+            for symbol_info in exchange_info.get('symbols', []):
+                # 只选择 TRADING 状态的交易对
+                if (symbol_info.get('status') == 'TRADING' and
+                    symbol_info.get('quoteAsset') == self.quote_asset):
+                    symbols.append(symbol_info['symbol'])
+
+            logger.info(f"找到 {len(symbols)} 个 {self.quote_asset} 交易对")
+            return symbols
+
+        except BinanceAPIException as e:
+            logger.error(f"获取交易所信息失败: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"获取交易对列表时发生错误: {e}")
+            return []
+
     async def connect_all_ticker(self):
-        """连接WebSocket并订阅所有Ticker（使用python-binance）"""
+        """连接WebSocket并订阅指定报价资产的所有Ticker（完整24hrTicker数据）
+
+        工作流程:
+        1. 创建 AsyncClient 连接
+        2. 调用 get_exchange_info() 获取所有交易对
+        3. 过滤出指定报价资产（如 USDT）的交易对
+        4. 使用 multiplex_socket 订阅所有这些交易对的 ticker 流
+        5. 启动消息处理循环
+        """
         try:
             logger.info(f"连接WebSocket: python-binance SDK (testnet={self.testnet})")
 
@@ -187,10 +246,22 @@ class BinanceWebSocketClient:
                 user_timeout=60  # 连接超时设置
             )
 
-            # 获取 mini ticker socket（支持async/await方式，每秒更新）
-            # 注意：ticker_socket() 需要回调函数参数，不适合async/await方式
-            # miniticker_socket() 返回所有mini ticker数据，更新频率更高（默认1秒）
-            self._ts = self._bm.miniticker_socket()
+            # 获取指定报价资产的所有交易对
+            self.subscribed_symbols = await self._get_quote_asset_symbols()
+
+            if not self.subscribed_symbols:
+                logger.warning(f"未找到任何 {self.quote_asset} 交易对，使用备用方案")
+                # 备用方案：使用 miniticker（数据不完整）
+                self._ts = self._bm.miniticker_socket()
+                logger.info("使用 mini ticker socket（数据字段受限）")
+            else:
+                # 构建流列表：每个 symbol 对应一个 ticker 流
+                # 格式: <symbol>@ticker  (如: btcusdt@ticker)
+                streams = [f"{symbol.lower()}@ticker" for symbol in self.subscribed_symbols]
+                logger.info(f"订阅 {len(streams)} 个 {self.quote_asset} 交易对的完整 ticker 数据")
+
+                # 使用 multiplex_socket 订阅多个流（支持 async/await）
+                self._ts = self._bm.multiplex_socket(streams)
 
             self.is_connected = True
             self.connection_start_time = datetime.now()
@@ -292,30 +363,48 @@ class BinanceWebSocketClient:
                 logger.warning(f"TickerData.from_dict返回None: {ticker_data}")
 
     async def _process_single_message(self, data: Dict):
-        """处理单个消息"""
-        event_type = data.get('e', '')
+        """处理单个消息
+
+        支持两种消息格式:
+        1. multiplex_socket 格式: {"stream": "btcusdt@ticker", "data": {...}}
+        2. 直接 ticker 格式: {"e": "24hrTicker", ...}
+        """
+        # 检查是否是 multiplex_socket 格式
+        if 'stream' in data and 'data' in data:
+            # multiplex_socket 格式: {"stream": "btcusdt@ticker", "data": {...}}
+            ticker_data = data['data']
+            event_type = ticker_data.get('e', '')
+            logger.debug(f"收到 multiplex 消息: stream={data['stream']}, event_type={event_type}")
+        else:
+            # 直接 ticker 格式
+            ticker_data = data
+            event_type = data.get('e', '')
+            logger.debug(f"收到直接 ticker 消息: event_type={event_type}")
 
         if event_type == '24hrMiniTicker':
             # Mini ticker数据（来自miniticker_socket）
-            ticker = TickerData.from_dict(data)
+            ticker = TickerData.from_dict(ticker_data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
             else:
-                logger.debug(f"MiniTicker解析失败: {data}")
+                logger.debug(f"MiniTicker解析失败: {ticker_data}")
         elif event_type == '24hrTicker':
-            # 完整ticker数据（24小时ticker）
-            ticker = TickerData.from_dict(data)
+            # 完整ticker数据（24小时ticker）- 包含所有算法需要的字段
+            ticker = TickerData.from_dict(ticker_data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
+                logger.debug(f"处理完整ticker: {ticker.symbol}, 价格变动: {ticker.price_change_percent:+.2f}%")
+            else:
+                logger.debug(f"Ticker解析失败: {ticker_data}")
         elif event_type == 'error':
             # 错误消息
-            logger.error(f"收到错误消息: {data}")
+            logger.error(f"收到错误消息: {ticker_data}")
             self.errors_count += 1
         else:
             # 其他类型的消息
-            logger.debug(f"忽略事件类型: {event_type}, 数据: {data}")
+            logger.debug(f"忽略事件类型: {event_type}, 数据: {ticker_data}")
 
     async def _handle_connection_error(self, error: Exception):
         """处理连接错误"""
@@ -416,9 +505,20 @@ class BinanceWebSocketClient:
 # 便利函数
 async def create_binance_ws_client(testnet: bool = True,
                                  ticker_callback: Optional[Callable[[TickerData], None]] = None,
-                                 error_callback: Optional[Callable[[Exception], None]] = None) -> BinanceWebSocketClient:
-    """创建并配置币安WebSocket客户端"""
-    client = BinanceWebSocketClient(testnet=testnet)
+                                 error_callback: Optional[Callable[[Exception], None]] = None,
+                                 quote_asset: str = 'USDT') -> BinanceWebSocketClient:
+    """创建并配置币安WebSocket客户端
+
+    Args:
+        testnet: 是否使用测试网
+        ticker_callback: Ticker数据回调函数
+        error_callback: 错误回调函数
+        quote_asset: 要订阅的报价资产，默认 'USDT'（如 'BUSD', 'USDC' 等）
+
+    Returns:
+        BinanceWebSocketClient: 配置好的WebSocket客户端
+    """
+    client = BinanceWebSocketClient(testnet=testnet, quote_asset=quote_asset)
 
     if ticker_callback:
         client.add_ticker_callback(ticker_callback)
