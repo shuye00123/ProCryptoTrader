@@ -1,28 +1,25 @@
 """
-币安WebSocket客户端 - 高频突破策略数据层
+币安WebSocket客户端 - 基于python-binance SDK实现
 
-## 核心问题修复
-问题：服务器每700多秒（约12分钟）断开连接
-原因：处理!ticker@arr消息时阻塞，导致pong无法及时回复
-解决：使用create_task异步处理消息，不阻塞消息循环
+## 核心功能
+- 使用python-binance的AsyncClient和BinanceSocketManager
+- 订阅全市场ticker数据（!ticker@arr）
+- 自动重连和错误处理
+- 保持原有接口兼容性
 
-## 原理说明
-1. Binance服务器每3分钟发送ping帧
-2. 如果10分钟内没收到pong，连接断开
-3. websockets库自动处理ping/pong，但需要事件循环不被阻塞
-4. !ticker@arr包含200+个ticker，处理耗时较长
-5. 使用await会阻塞消息循环，导致pong延迟
-6. 使用create_task让消息处理在后台执行，不阻塞recv()
+## 迁移说明
+从websockets库迁移到python-binance SDK，提供更稳定的连接和官方支持。
 """
 
 import asyncio
-import json
 import logging
 from typing import Callable, Dict, List, Optional
 from datetime import datetime
 from dataclasses import dataclass
-import websockets
-from websockets.exceptions import ConnectionClosed
+
+# python-binance SDK
+from binance import AsyncClient, BinanceSocketManager
+from binance.exceptions import BinanceAPIException
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -72,7 +69,7 @@ class TickerData:
 
     @classmethod
     def from_dict(cls, data: Dict) -> 'TickerData':
-        """从字典创建TickerData实例"""
+        """从字典创建TickerData实例（兼容Binance API格式）"""
         try:
             return cls(
                 symbol=data['s'],
@@ -99,12 +96,16 @@ class TickerData:
 
 
 class BinanceWebSocketClient:
-    """币安WebSocket客户端
+    """币安WebSocket客户端 - 基于python-binance SDK
 
-    关键修复：使用create_task处理消息，避免阻塞pong回复
+    使用AsyncClient和BinanceSocketManager实现：
+    - 全市场ticker订阅
+    - 自动重连机制
+    - 保持原有接口兼容性
     """
 
     def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5):
+        # 连接配置
         self.testnet = testnet
         self.max_reconnects = max_reconnects
         self.reconnect_interval = reconnect_interval
@@ -113,22 +114,33 @@ class BinanceWebSocketClient:
         self.is_running = False
         self._should_reconnect = False
 
+        # python-binance 组件
+        self._client: Optional[AsyncClient] = None      # AsyncClient实例
+        self._bm: Optional[BinanceSocketManager] = None # BinanceSocketManager实例
+        self._ts = None                                 # Ticker socket
+        self._ts_context = None                         # Socket上下文
+
+        # 兼容性：保留原有属性名
         self.ws_connection = None
         self.ws_url = "wss://stream.binancefuture.com/ws" if testnet else "wss://fstream.binance.com/ws"
 
+        # 连接状态
         self.connection_start_time = None
         self.ticker_callbacks: List[Callable] = []
         self.error_callbacks: List[Callable] = []
         self.ticker_cache: Dict[str, TickerData] = {}
 
+        # 统计信息
         self.messages_received = 0
         self.errors_count = 0
         self._last_recv_time = None
 
     def add_ticker_callback(self, callback: Callable):
+        """添加Ticker数据回调函数"""
         self.ticker_callbacks.append(callback)
 
     def add_error_callback(self, callback: Callable):
+        """添加错误回调函数"""
         self.error_callbacks.append(callback)
 
     async def _call_ticker_callbacks(self, ticker: TickerData):
@@ -152,98 +164,104 @@ class BinanceWebSocketClient:
                 pass
 
     async def connect_all_ticker(self):
-        """连接WebSocket并订阅所有Ticker"""
-        logger.info(f"连接WebSocket: {self.ws_url}")
-
-        # 关闭旧连接
-        if self.ws_connection:
-            try:
-                await self.ws_connection.close()
-            except Exception:
-                pass
-            self.ws_connection = None
-
-        # 关键：不主动发送ping，让websockets库自动处理服务器的ping
-        self.ws_connection = await websockets.connect(
-            self.ws_url,
-            ping_interval=None,    # 不主动发送ping
-            ping_timeout=None,     # 不设置ping超时
-            close_timeout=10,
-            max_queue=2**16,
-        )
-
-        self.is_connected = True
-        self.connection_start_time = datetime.now()
-        # 连接成功后重置重连计数
-        if self.reconnect_count == 0:
-            logger.info("WebSocket连接成功")
-        else:
-            logger.info(f"WebSocket重连成功 (第{self.reconnect_count}次)")
-
-        await self._subscribe_all_ticker()
-        await self._message_loop()
-
-    async def _subscribe_all_ticker(self):
-        """订阅所有Ticker数据"""
-        subscribe_msg = {"method": "SUBSCRIBE", "params": ["!ticker@arr"], "id": 1}
+        """连接WebSocket并订阅所有Ticker（使用python-binance）"""
         try:
-            await self.ws_connection.send(json.dumps(subscribe_msg))
-            response = await asyncio.wait_for(self.ws_connection.recv(), timeout=10)
-            response_data = json.loads(response)
-            if response_data.get('id') == 1 and response_data.get('result') is None:
-                logger.info("订阅成功")
+            logger.info(f"连接WebSocket: python-binance SDK (testnet={self.testnet})")
+
+            # 关闭旧连接
+            await self.disconnect()
+
+            # 初始化 AsyncClient（公共数据流不需要API密钥）
+            self._client = await AsyncClient.create(
+                api_key=None,
+                api_secret=None,
+                testnet=self.testnet
+            )
+
+            # 创建 BinanceSocketManager
+            self._bm = BinanceSocketManager(
+                client=self._client,
+                user_timeout=60  # 连接超时设置
+            )
+
+            # 获取 ticker socket（等效于 !ticker@arr 全市场订阅）
+            self._ts = self._bm.ticker_socket()
+
+            self.is_connected = True
+            self.connection_start_time = datetime.now()
+            # 连接成功后重置重连计数
+            if self.reconnect_count == 0:
+                logger.info("WebSocket连接成功 (python-binance)")
+            else:
+                logger.info(f"WebSocket重连成功 (第{self.reconnect_count}次)")
+            self.reconnect_count = 0  # 重置重连计数
+
+            # 启动消息循环
+            await self._message_loop()
+
+        except BinanceAPIException as e:
+            logger.error(f"Binance API错误: {e}")
+            self.is_connected = False
+            await self._handle_connection_error(e)
         except Exception as e:
-            logger.error(f"订阅失败: {e}")
+            logger.error(f"连接失败: {e}")
+            self.is_connected = False
+            await self._handle_connection_error(e)
 
     async def _message_loop(self):
-        """消息处理循环"""
+        """消息处理循环（使用python-binance socket）"""
         self.is_running = True
         self._should_reconnect = False
         self._last_recv_time = datetime.now()
         logger.info("开始消息处理循环")
 
         try:
-            while self.is_running and self.is_connected:
-                # 10分钟静默检测
-                if (datetime.now() - self._last_recv_time).total_seconds() > 600:
-                    logger.warning("10分钟未收到数据，可能连接已断开")
-                    self._should_reconnect = True
-                    break
+            # 使用 async with 管理 socket 生命周期
+            async with self._ts as tscm:
+                self._ts_context = tscm
 
-                # 接收消息
-                message = await self.ws_connection.recv()
-                self._last_recv_time = datetime.now()
-                self.messages_received += 1
+                while self.is_running and self.is_connected:
+                    # 10分钟静默检测
+                    if (datetime.now() - self._last_recv_time).total_seconds() > 600:
+                        logger.warning("10分钟未收到数据，可能连接已断开")
+                        self._should_reconnect = True
+                        break
 
-                # 定期输出连接状态（每1000条消息）
-                if self.messages_received % 1000 == 0:
-                    if self.connection_start_time:
-                        duration = (datetime.now() - self.connection_start_time).total_seconds()
-                        logger.info(f"📊 已接收消息: {self.messages_received}条, "
-                                   f"连接时长: {duration:.0f}秒")
+                    # 接收消息（python-binance自动处理JSON解析）
+                    message = await tscm.recv()
+                    self._last_recv_time = datetime.now()
+                    self.messages_received += 1
 
-                # 🔥 关键修复：使用create_task避免阻塞
-                # 让websockets库能继续处理服务器的ping帧并自动回复pong
-                asyncio.create_task(self._handle_message(message))
+                    # 定期输出连接状态（每1000条消息）
+                    if self.messages_received % 1000 == 0:
+                        if self.connection_start_time:
+                            duration = (datetime.now() - self.connection_start_time).total_seconds()
+                            logger.info(f"📊 已接收消息: {self.messages_received}条, "
+                                       f"连接时长: {duration:.0f}秒")
 
-        except ConnectionClosed as e:
-            logger.info(f"连接关闭: {e}")
-            self.is_connected = False
-            await self._handle_connection_error(e)
+                    # 异步处理消息，避免阻塞接收
+                    asyncio.create_task(self._handle_message(message))
+
         except Exception as e:
-            logger.error(f"消息循环异常: {e}")
+            logger.info(f"连接关闭: {e}")
             self.is_connected = False
             await self._handle_connection_error(e)
         finally:
             self.is_running = False
+            self._ts_context = None
             # 如果需要重连，启动重连循环
             if not self.is_connected and self.reconnect_count < self.max_reconnects:
                 await self._reconnect_loop()
 
-    async def _handle_message(self, message: str):
-        """处理WebSocket消息（后台任务，不阻塞主循环）"""
+    async def _handle_message(self, message):
+        """处理WebSocket消息（后台任务，不阻塞主循环）
+
+        python-binance返回的消息格式与Binance API一致，
+        TickerData.from_dict()可以直接使用。
+        """
         try:
-            data = json.loads(message)
+            # python-binance已经解析为字典
+            data = message if isinstance(message, dict) else {}
 
             # 处理不同类型的消息
             if isinstance(data, list):
@@ -252,9 +270,6 @@ class BinanceWebSocketClient:
             elif isinstance(data, dict):
                 await self._process_single_message(data)
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析失败: {e}")
-            self.errors_count += 1
         except Exception as e:
             logger.error(f"消息处理失败: {e}")
             self.errors_count += 1
@@ -269,27 +284,17 @@ class BinanceWebSocketClient:
 
     async def _process_single_message(self, data: Dict):
         """处理单个消息"""
-        if 'id' in data:
-            # 订阅响应
-            logger.debug(f"收到响应消息: {data}")
-        elif 'error' in data:
-            logger.error(f"收到错误消息: {data['error']}")
-            self.errors_count += 1
-        elif 'e' in data and data['e'] == '24hrTicker':
-            # 单个ticker数据
+        if 'e' in data and data['e'] == '24hrTicker':
+            # 单个ticker数据（24小时ticker）
             ticker = TickerData.from_dict(data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
-        elif 'stream' in data and 'data' in data:
-            # 流式ticker数据
-            ticker_data = data['data']
-            ticker = TickerData.from_dict(ticker_data)
-            if ticker:
-                self.ticker_cache[ticker.symbol] = ticker
-                await self._call_ticker_callbacks(ticker)
-        else:
-            logger.debug(f"未处理的消息类型: {data}")
+        elif 'e' in data and data['e'] == 'error':
+            # 错误消息
+            logger.error(f"收到错误消息: {data}")
+            self.errors_count += 1
+        # 忽略其他类型的消息
 
     async def _handle_connection_error(self, error: Exception):
         """处理连接错误"""
@@ -305,7 +310,10 @@ class BinanceWebSocketClient:
             self.reconnect_count += 1
 
             # 指数退避
-            backoff_interval = min(self.reconnect_interval * (1.5 ** (self.reconnect_count - 1)), 60)
+            backoff_interval = min(
+                self.reconnect_interval * (1.5 ** (self.reconnect_count - 1)),
+                60  # 最大60秒
+            )
 
             logger.info(f"尝试重连 ({self.reconnect_count}/{self.max_reconnects}), "
                        f"等待 {backoff_interval:.1f} 秒后开始...")
@@ -313,13 +321,9 @@ class BinanceWebSocketClient:
 
             try:
                 # 关闭旧连接
-                if self.ws_connection:
-                    try:
-                        await self.ws_connection.close()
-                    except Exception:
-                        pass
-                    self.ws_connection = None
+                await self.disconnect()
 
+                # 尝试重新连接
                 await self.connect_all_ticker()
                 return  # 连接成功，退出重连循环
 
@@ -336,12 +340,23 @@ class BinanceWebSocketClient:
         self.is_running = False
         self.is_connected = False
 
-        if self.ws_connection:
-            try:
-                await self.ws_connection.close()
-                logger.info("WebSocket连接已关闭")
-            except Exception as e:
-                logger.error(f"关闭连接时出错: {e}")
+        try:
+            # 退出socket上下文
+            if self._ts_context:
+                try:
+                    await self._ts_context.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                self._ts_context = None
+
+            # 关闭AsyncClient连接
+            if self._client:
+                await self._client.close_connection()
+                self._client = None
+
+            logger.info("WebSocket连接已关闭")
+        except Exception as e:
+            logger.error(f"关闭连接时出错: {e}")
 
     def get_ticker(self, symbol: str) -> Optional[TickerData]:
         """获取指定交易对的最新Ticker数据"""

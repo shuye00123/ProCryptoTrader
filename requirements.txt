@@ -20,6 +20,7 @@ aiohttp>=3.13.0                 # Async HTTP client for webhook notifications
 # TRADING AND EXCHANGE API LIBRARIES
 # ============================================================================
 ccxt>=4.5.11                     # Cryptocurrency exchange unified API interface
+python-binance>=1.0.19           # Official Binance API SDK with WebSocket support
 requests>=2.32.5                # HTTP requests and REST API calls
 
 # ============================================================================
