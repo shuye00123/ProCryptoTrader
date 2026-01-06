@@ -187,7 +187,7 @@ class AsyncTickSaver:
 
     async def _write_to_file(self, symbol: str, tick_data_list: List[TickerData],
                            file_key: str) -> bool:
-        """写入Parquet文件
+        """写入Parquet文件 - 追加模式
 
         Args:
             symbol: 交易对符号
@@ -207,6 +207,34 @@ class AsyncTickSaver:
         if df.empty:
             return True
 
+        # ✅ 追加模式：在异步上下文中读取现有文件并合并
+        if file_path.exists():
+            try:
+                # 异步读取现有数据
+                loop = asyncio.get_event_loop()
+                existing_df = await loop.run_in_executor(
+                    None,  # 使用默认executor
+                    pd.read_parquet,
+                    file_path
+                )
+
+                original_count = len(existing_df)
+
+                # 合并新旧数据
+                df = pd.concat([existing_df, df], ignore_index=True)
+
+                # 去重（基于event_time，保留最新的）
+                if 'event_time' in df.columns:
+                    before_dedup = len(df)
+                    df = df.drop_duplicates(subset=['event_time'], keep='last')
+                    after_dedup = len(df)
+                    if before_dedup > after_dedup:
+                        logger.debug(f"去重: 移除{before_dedup - after_dedup}条重复数据")
+
+                logger.info(f"📝 追加模式: 读取{original_count}行，新增{len(df)-original_count}行，总计{len(df)}行")
+            except Exception as e:
+                logger.warning(f"⚠️  读取现有文件失败，将覆盖写入: {e}")
+
         # 使用线程池执行实际的文件写入
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -222,7 +250,7 @@ class AsyncTickSaver:
 
         Args:
             file_path: 文件路径
-            df: 数据DataFrame
+            df: 数据DataFrame（已合并和去重）
             file_key: 文件键
 
         Returns:
@@ -266,11 +294,11 @@ class AsyncTickSaver:
                 with open(checksum_path, 'w', encoding='utf-8') as f:
                     json.dump(checksum_data, f, indent=2)
 
-            logger.debug(f"成功写入Parquet文件: {file_path} ({len(df)}行)")
+            logger.info(f"✅ 成功写入Parquet文件: {file_path.name} ({len(df)}行)")
             return True
 
         except Exception as e:
-            logger.error(f"写入Parquet文件失败: {e}")
+            logger.error(f"❌ 写入Parquet文件失败: {e}")
             # 清理临时文件
             if 'temp_path' in locals() and temp_path.exists():
                 temp_path.unlink()
