@@ -454,6 +454,47 @@ class StreamingDiskQueue:
                     # 确保目标目录存在
                     final_path.parent.mkdir(parents=True, exist_ok=True)
 
+                    # ✅ 追加模式：如果目标文件已存在，先合并数据
+                    if final_path.exists():
+                        try:
+                            # 在线程池中读取并合并文件
+                            def merge_files(temp_p, final_p):
+                                import pandas as pd
+
+                                # 读取临时文件和最终文件
+                                temp_df = pd.read_parquet(temp_p)
+                                final_df = pd.read_parquet(final_p)
+
+                                original_count = len(final_df)
+
+                                # 合并数据
+                                merged_df = pd.concat([final_df, temp_df], ignore_index=True)
+
+                                # 去重（基于event_time，保留最新的）
+                                if 'event_time' in merged_df.columns:
+                                    before_dedup = len(merged_df)
+                                    merged_df = merged_df.drop_duplicates(subset=['event_time'], keep='last')
+                                    after_dedup = len(merged_df)
+                                    if before_dedup > after_dedup:
+                                        logger.debug(f"去重: 移除{before_dedup - after_dedup}条重复数据")
+
+                                # 写入临时文件
+                                temp_p.unlink()  # 先删除旧的临时文件
+                                merged_df.to_parquet(
+                                    temp_p,
+                                    engine='pyarrow',
+                                    compression='snappy',
+                                    index=False
+                                )
+
+                                logger.info(f"📝 追加模式: {symbol} 读取{original_count}行，新增{len(temp_df)}行，总计{len(merged_df)}行")
+                                return True
+
+                            await loop.run_in_executor(None, merge_files, temp_path, final_path)
+
+                        except Exception as e:
+                            logger.warning(f"⚠️  合并文件失败，将覆盖: {e}")
+
                     # 移动文件（原子操作，极快）
                     await loop.run_in_executor(None, temp_path.rename, final_path)
 
