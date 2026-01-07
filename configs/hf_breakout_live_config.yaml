@@ -232,7 +232,7 @@ symbols:
 # 🔥 新增：WebSocket订阅白名单（主网消息量控制）
 websocket_subscribe:
   # 白名单模式：只订阅这些交易对（推荐主网使用）
-  enabled: true
+  enabled: false
   whitelist:
     - "BTCUSDT"
     - "ETHUSDT"
