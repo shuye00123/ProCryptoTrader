@@ -117,6 +117,7 @@ class TickDataConfig:
     # 基础配置
     enabled: bool = True
     save_interval_seconds: int = 300  # 5分钟
+    testnet: bool = False  # 🔥 新增：默认主网（False）- WebSocket网络配置
 
     # 子配置
     storage: StorageConfig = field(default_factory=StorageConfig)
@@ -131,10 +132,20 @@ class TickDataConfig:
         if self.save_interval_seconds < 60 or self.save_interval_seconds > 3600:
             raise ValueError("保存间隔必须在60-3600秒之间")
 
+        # 🔥 新增：testnet配置日志
+        if self.testnet:
+            logger.warning("⚠️  当前使用testnet（测试网）环境")
+        else:
+            logger.info("✅ 当前使用mainnet（主网）环境")
+
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'TickDataConfig':
         """从字典创建配置对象"""
         tick_config = config_dict.get('tick_data_persistence', {})
+
+        # 🔥 新增：从exchange配置读取testnet（向后兼容）
+        exchange_config = config_dict.get('exchange', {})
+        testnet_value = tick_config.get('testnet', exchange_config.get('testnet', False))
 
         # 创建子配置对象
         storage_config = StorageConfig(**tick_config.get('storage', {}))
@@ -147,6 +158,7 @@ class TickDataConfig:
         return cls(
             enabled=tick_config.get('enabled', True),
             save_interval_seconds=tick_config.get('save_interval_seconds', 300),
+            testnet=testnet_value,  # 🔥 新增
             storage=storage_config,
             buffer=buffer_config,
             performance=performance_config,

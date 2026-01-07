@@ -116,9 +116,21 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
         # 风险管理器
         self.risk_manager = HighFrequencyRiskManager(config)
 
-        # WebSocket客户端
-        self.ws_client = None
-        self.ws_config = config.get('websocket', {})
+        # 🔥 修改：WebSocket配置 - 支持从exchange或websocket段读取testnet
+        exchange_config = config.get('exchange', {})
+        websocket_config = config.get('websocket', {})
+
+        # 优先使用websocket.testnet，其次使用exchange.testnet，最后默认False（主网）
+        testnet_value = websocket_config.get('testnet', exchange_config.get('testnet', False))
+
+        self.ws_config = {
+            'testnet': testnet_value,
+            'max_reconnects': websocket_config.get('reconnect_attempts', 10),
+            'reconnect_interval': websocket_config.get('reconnect_delay', 5000) / 1000
+        }
+
+        # 日志输出（便于调试）
+        logger.info(f"🔧 WebSocket配置: testnet={self.ws_config['testnet']}")
 
         # 实时数据处理状态
         self.is_running = False
@@ -211,12 +223,18 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
     async def _start_websocket_connection(self):
         """启动WebSocket连接"""
         try:
+            # 🔥 添加：清晰的日志输出当前网络
+            network = "testnet" if self.ws_config['testnet'] else "mainnet"
+            logger.info(f"🔌 正在连接到Binance {network}...")
+
             # 创建WebSocket客户端
             self.ws_client = BinanceWebSocketClient(
-                testnet=self.ws_config.get('testnet', True),
+                testnet=self.ws_config['testnet'],  # 🔥 使用配置值
                 max_reconnects=self.ws_config.get('max_reconnects', 10),
                 reconnect_interval=self.ws_config.get('reconnect_interval', 5)
             )
+
+            logger.info(f"✅ WebSocket客户端已创建 (network={network})")
 
             # 添加回调函数
             self.ws_client.add_ticker_callback(self._on_ticker_data)

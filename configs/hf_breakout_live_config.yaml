@@ -150,10 +150,10 @@ strategy:
 # 交易所配置
 exchange:
   # Binance API配置
-  api_key: ""  # 请填入您的API Key
-  api_secret: ""  # 请填入您的API Secret
-  sandbox: true  # true=测试网, false=主网
-  testnet: true
+  api_key: ""  # 🔥 如需实盘交易，请填入真实API Key
+  api_secret: ""  # 🔥 如需实盘交易，请填入真实API Secret
+  sandbox: false  # 🔥 改为false（主网）
+  testnet: false  # 🔥 改为false（主网WebSocket）
 
   # WebSocket配置
   websocket:
