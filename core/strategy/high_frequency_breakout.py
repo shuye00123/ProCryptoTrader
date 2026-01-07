@@ -132,9 +132,36 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
         # 日志输出（便于调试）
         logger.info(f"🔧 WebSocket配置: testnet={self.ws_config['testnet']}")
 
+        # 🔥 订阅白名单配置（主网消息量控制）
+        websocket_subscribe_config = config.get('websocket_subscribe', {})
+        self.subscribe_whitelist = None
+
+        if websocket_subscribe_config.get('enabled', False):
+            whitelist = websocket_subscribe_config.get('whitelist', [])
+            if whitelist:
+                self.subscribe_whitelist = whitelist
+                logger.info(f"🔒 订阅白名单已启用: {len(whitelist)} 个交易对")
+            else:
+                logger.warning("⚠️  websocket_subscribe.enabled=true 但whitelist为空，将订阅所有交易对")
+        else:
+            logger.info("📡 订阅白名单未启用，将订阅所有交易对")
+
         # 实时数据处理状态
         self.is_running = False
         self.processing_task = None
+
+        # 🔥 批量处理优化配置（从配置文件读取）
+        performance_config = config.get('performance', {})
+        self.enable_batch_processing = performance_config.get('enable_batch_processing', True)  # 默认启用
+        self.ticker_buffer: Dict[str, deque] = {}
+        self.ticker_buffer_max_size = performance_config.get('ticker_buffer_max_size', 50)  # 每个symbol最多缓存50条
+        self.batch_processing_interval = performance_config.get('batch_processing_interval', 1.0)  # 批量处理间隔（秒）
+        self.last_batch_process_time = time.time()
+
+        if self.enable_batch_processing:
+            logger.info(f"✅ 批量处理模式已启用: 缓冲大小={self.ticker_buffer_max_size}, 处理间隔={self.batch_processing_interval}秒")
+        else:
+            logger.info("📡 实时处理模式（每个ticker立即处理）")
 
         # 信号管理
         self.active_signals: Dict[str, List[BreakoutSignal]] = defaultdict(list)
@@ -231,7 +258,9 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
             self.ws_client = BinanceWebSocketClient(
                 testnet=self.ws_config['testnet'],  # 🔥 使用配置值
                 max_reconnects=self.ws_config.get('max_reconnects', 10),
-                reconnect_interval=self.ws_config.get('reconnect_interval', 5)
+                reconnect_interval=self.ws_config.get('reconnect_interval', 5),
+                subscribe_whitelist=self.subscribe_whitelist,  # 🔥 传递订阅白名单
+                max_queue_size=performance_config.get('sdk_max_queue_size', 10000)  # 🔥 传递SDK队列大小
             )
 
             logger.info(f"✅ WebSocket客户端已创建 (network={network})")
@@ -259,11 +288,43 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
             self.is_running = False
 
     def _on_ticker_data(self, ticker_data: TickerData):
-        """处理接收到的Ticker数据"""
+        """处理接收到的Ticker数据 - 支持批量处理和实时处理模式"""
         try:
-            # 异步处理数据
-            if self.is_running:
+            if not self.is_running:
+                return
+
+            # 🔥 根据配置选择处理模式
+            if self.enable_batch_processing:
+                # 批量处理模式：缓存ticker数据，减少task创建
+                symbol = ticker_data.symbol
+
+                # 初始化symbol的buffer
+                if symbol not in self.ticker_buffer:
+                    self.ticker_buffer[symbol] = deque(maxlen=self.ticker_buffer_max_size)
+
+                # 添加到buffer（自动淘汰旧数据）
+                self.ticker_buffer[symbol].append(ticker_data)
+
+                # 🔥 检查是否需要触发批量处理
+                current_time = time.time()
+                time_since_last_process = current_time - self.last_batch_process_time
+
+                # 触发条件：
+                # 1. 达到处理间隔
+                # 2. 或者某个symbol buffer满了
+                should_process = (
+                    time_since_last_process >= self.batch_processing_interval or
+                    any(len(buffer) >= self.ticker_buffer_max_size for buffer in self.ticker_buffer.values())
+                )
+
+                if should_process:
+                    # 只创建一个task处理所有缓存的ticker
+                    asyncio.create_task(self._process_ticker_batch_async())
+                    self.last_batch_process_time = current_time
+            else:
+                # 实时处理模式：每个ticker立即处理（原有逻辑）
                 asyncio.create_task(self._process_ticker_async(ticker_data))
+
         except Exception as e:
             logger.error(f"处理Ticker数据失败: {e}")
             self.strategy_stats['processing_errors'] += 1
@@ -310,6 +371,39 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
 
         except Exception as e:
             logger.error(f"异步处理Ticker数据失败 {ticker_data.symbol}: {e}")
+            self.strategy_stats['processing_errors'] += 1
+
+    async def _process_ticker_batch_async(self):
+        """批量处理缓存的Ticker数据 - 性能优化核心"""
+        try:
+            if not self.ticker_buffer:
+                return
+
+            # 获取所有缓存的ticker数据
+            all_tickers = []
+            for symbol, ticker_deque in self.ticker_buffer.items():
+                # 取出所有ticker
+                while ticker_deque:
+                    all_tickers.append(ticker_deque.popleft())
+
+            if not all_tickers:
+                return
+
+            logger.debug(f"🔄 批量处理 {len(all_tickers)} 条ticker数据，覆盖 {len(set(t.symbol for t in all_tickers))} 个交易对")
+
+            # 批量处理所有ticker
+            for ticker_data in all_tickers:
+                try:
+                    # 调用原有的单个ticker处理逻辑
+                    await self._process_ticker_async(ticker_data)
+                except Exception as e:
+                    logger.error(f"批量处理中单ticker失败 {ticker_data.symbol}: {e}")
+                    continue
+
+            logger.debug(f"✅ 批量处理完成，处理了 {len(all_tickers)} 条ticker")
+
+        except Exception as e:
+            logger.error(f"批量处理Ticker数据失败: {e}")
             self.strategy_stats['processing_errors'] += 1
 
     async def _process_tick_breakout_detection(self, ticker_data: TickerData) -> Optional[BreakoutSignal]:

@@ -120,7 +120,9 @@ class BinanceWebSocketClient:
     """
 
     def __init__(self, testnet: bool = True, max_reconnects: int = 10, reconnect_interval: int = 5,
-                 quote_asset: str = 'USDT', symbols_cache_ttl_days: int = 7):
+                 quote_asset: str = 'USDT', symbols_cache_ttl_days: int = 7,
+                 subscribe_whitelist: Optional[List[str]] = None,
+                 max_queue_size: int = 10000):  # 🔥 新增：队列大小配置
         # 连接配置
         self.testnet = testnet
         self.max_reconnects = max_reconnects
@@ -130,6 +132,16 @@ class BinanceWebSocketClient:
         self.is_running = False
         self._should_reconnect = False
         self.quote_asset = quote_asset.upper()  # 默认订阅 USDT 交易对
+
+        # 🔥 队列大小配置（解决主网消息队列溢出）
+        self.max_queue_size = max_queue_size
+        logger.info(f"📦 SDK队列大小配置: {self.max_queue_size}")
+
+        # 🔥 订阅白名单配置（主网消息量控制）
+        self.subscribe_whitelist = subscribe_whitelist  # 白名单列表，如 ['BTCUSDT', 'ETHUSDT']
+        if self.subscribe_whitelist:
+            logger.info(f"🔒 订阅白名单模式: {len(self.subscribe_whitelist)} 个交易对")
+            logger.info(f"   白名单: {self.subscribe_whitelist[:10]}{'...' if len(self.subscribe_whitelist) > 10 else ''}")
 
         # 交易对缓存配置
         self.symbols_cache_ttl = symbols_cache_ttl_days * 86400  # 转换为秒
@@ -286,11 +298,23 @@ class BinanceWebSocketClient:
             # 创建 BinanceSocketManager
             self._bm = BinanceSocketManager(
                 client=self._client,
-                user_timeout=60  # 连接超时设置
+                user_timeout=60,  # 连接超时设置
+                max_queue_size=self.max_queue_size  # 🔥 传入队列大小配置
             )
 
             # 获取交易对列表（优先使用缓存）
             self.subscribed_symbols = await self._get_or_refresh_symbols()
+
+            # 🔥 应用订阅白名单过滤（主网消息量控制）
+            if self.subscribe_whitelist and self.subscribed_symbols:
+                original_count = len(self.subscribed_symbols)
+                # 转换白名单为大写并过滤
+                whitelist_upper = [s.upper() for s in self.subscribe_whitelist]
+                self.subscribed_symbols = [
+                    s for s in self.subscribed_symbols
+                    if s.upper() in whitelist_upper
+                ]
+                logger.info(f"✂️  白名单过滤: {original_count} → {len(self.subscribed_symbols)} 个交易对")
 
             if not self.subscribed_symbols:
                 logger.warning(f"未找到任何 {self.quote_asset} 交易对，使用备用方案")
@@ -301,7 +325,13 @@ class BinanceWebSocketClient:
                 # 构建流列表：每个 symbol 对应一个 ticker 流
                 # 格式: <symbol>@ticker  (如: btcusdt@ticker)
                 streams = [f"{symbol.lower()}@ticker" for symbol in self.subscribed_symbols]
-                logger.info(f"订阅 {len(streams)} 个 {self.quote_asset} 交易对的完整 ticker 数据")
+
+                # 🔥 改进日志输出
+                if self.subscribe_whitelist:
+                    logger.info(f"✅ 订阅白名单模式: {len(streams)} 个 {self.quote_asset} 交易对")
+                    logger.info(f"   订阅列表: {', '.join(self.subscribed_symbols[:10])}{'...' if len(self.subscribed_symbols) > 10 else ''}")
+                else:
+                    logger.info(f"订阅 {len(streams)} 个 {self.quote_asset} 交易对的完整 ticker 数据")
 
                 # 使用 multiplex_socket 订阅多个流（支持 async/await）
                 self._ts = self._bm.multiplex_socket(streams)

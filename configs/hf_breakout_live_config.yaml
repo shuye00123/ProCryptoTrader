@@ -147,6 +147,36 @@ strategy:
     min_confirmation_count: 2          # 新增：至少2个算法确认
     quality_score_threshold: 0.75      # 新增：质量评分阈值
 
+  # 🔥 性能优化配置（主网消息量优化）
+  performance:
+    # 批量处理模式 - 减少asyncio task创建数量
+    enable_batch_processing: true     # 启用批量处理（推荐）
+    ticker_buffer_max_size: 50        # 每个symbol缓冲区大小（条数）
+    batch_processing_interval: 1.0    # 批量处理间隔（秒）
+
+    # 🔥 SDK队列大小配置（解决python-binance队列溢出）
+    sdk_max_queue_size: 10000          # python-binance SDK内部队列大小
+
+    # 配置说明：
+    # - enable_batch_processing: true（批量）/ false（实时）
+    # - ticker_buffer_max_size: 每个交易对最多缓存的ticker数量
+    # - batch_processing_interval: 批量处理触发间隔（秒）
+    # - sdk_max_queue_size: python-binance BinanceSocketManager的队列大小
+    #
+    # 性能对比（418个交易对）：
+    # - 实时处理: 每秒创建数千个task → 队列溢出
+    # - 批量处理: 每秒创建1个task → 稳定运行
+    # - SDK队列100: 0.08秒溢出
+    # - SDK队列10000: 8秒溢出（足够处理）
+    #
+    # 推荐配置（主网全订阅）：
+    # - enable_batch_processing: true
+    # - sdk_max_queue_size: 10000
+    #
+    # 推荐配置（testnet）：
+    # - enable_batch_processing: false（消息量小，实时处理即可）
+    # - sdk_max_queue_size: 100（默认即可）
+
 # 交易所配置
 exchange:
   # Binance API配置
@@ -198,6 +228,25 @@ symbols:
   - "BTC-USDT"
   - "ETH-USDT"
   - "BNB-USDT"
+
+# 🔥 新增：WebSocket订阅白名单（主网消息量控制）
+websocket_subscribe:
+  # 白名单模式：只订阅这些交易对（推荐主网使用）
+  enabled: true
+  whitelist:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+    - "SOLUSDT"
+    - "ADAUSDT"
+    - "AVAXUSDT"
+    - "DOTUSDT"
+    - "MATICUSDT"
+    - "LINKUSDT"
+    - "ATOMUSDT"  # 总计10个高流动性交易对
+
+  # 如果whitelist为空，则订阅所有symbols（仅限testnet或低订阅场景）
+  # ⚠️ 主网订阅所有交易对会导致队列溢出！
 
 # 风险控制
 risk_control:
