@@ -152,6 +152,7 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
 
         # 🔥 批量处理优化配置（从配置文件读取）
         performance_config = config.get('performance', {})
+        self.performance_config = performance_config  # 保存为实例变量，供后续方法使用
         self.enable_batch_processing = performance_config.get('enable_batch_processing', True)  # 默认启用
         self.ticker_buffer: Dict[str, deque] = {}
         self.ticker_buffer_max_size = performance_config.get('ticker_buffer_max_size', 50)  # 每个symbol最多缓存50条
@@ -260,7 +261,7 @@ class HighFrequencyBreakoutStrategy(BaseStrategy):
                 max_reconnects=self.ws_config.get('max_reconnects', 10),
                 reconnect_interval=self.ws_config.get('reconnect_interval', 5),
                 subscribe_whitelist=self.subscribe_whitelist,  # 🔥 传递订阅白名单
-                max_queue_size=performance_config.get('sdk_max_queue_size', 10000)  # 🔥 传递SDK队列大小
+                max_queue_size=self.performance_config.get('sdk_max_queue_size', 10000)  # 🔥 传递SDK队列大小
             )
 
             logger.info(f"✅ WebSocket客户端已创建 (network={network})")
