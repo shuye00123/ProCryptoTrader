@@ -38,19 +38,33 @@ strategy:
   max_total_exposure: 0.15  # 最大总暴露 (15%)
   signal_cooldown: 30  # 信号冷却时间 (秒)
 
-  # Tick级别突破检测配置 - 严格优化版
+  # Tick级别突破检测配置 - 双币种验证优化版
   tick_breakout:
     enabled: true  # 启用Tick级别突破检测
-    window_size: 200  # Tick数据窗口大小 (从200增加到500)
-    min_breakout_strength: 2.0  # 最小突破强度 (从3.0提高到5.0)
-    volume_threshold: 1.3  # 🔧 优化：成交量阈值降低 (从1.8到1.3，提高触发率)
-    consecutive_moves_threshold: 5  # 连续变动阈值 (从5增加到8)
-    breakout_cooldown: 3000  # 突破冷却期 (从5秒增加到10秒)
+    window_size: 200  # Tick数据窗口大小
+    min_breakout_strength: 2.5  # ✅ 双币种验证最优值 (从2.0提高到2.5)
+    volume_threshold: 2.0  # ✅ 双币种中位数验证 (从1.3提高到2.0)
+    consecutive_moves_threshold: 5  # 连续变动阈值 (保持不变)
+    breakout_cooldown: 3000  # 突破冷却期 (保持不变)
 
     # 多重确认机制
-    require_multiple_confirmation: true  # 🔧 关闭：确保单算法能产生信号
-    min_confirmation_count: 2            # 🔧 降低：只需要1个确认
-    confirmation_window: 5000           # 🔧 增加：更长的确认窗口
+    require_multiple_confirmation: true
+    min_confirmation_count: 3  # ✅ 从2提高到3 (更严格)
+    confirmation_window: 5000
+
+    # 🔥 实时质量评分配置 (新增 - 可配置)
+    quality_scoring:
+      enabled: false  # 🔧 默认关闭，测试后开启
+      quality_threshold: 0.80  # ✅ 保守型配置：只交易最高质量信号
+      cooldown_seconds: 300  # 执行冷却期 (秒)
+
+      # 质量评分权重配置
+      weights:
+        algo_diversity: 0.20      # 算法多样性权重
+        strength_consistency: 0.15 # 强度一致性权重
+        combined_strength: 0.25    # 综合强度权重
+        volume_surge: 0.20         # 成交量激增权重
+        price_momentum: 0.20       # 价格动量权重
 
     # 🔥 方向协调机制
     direction_coordination:
@@ -76,26 +90,26 @@ strategy:
       min_direction_confirmations: 2      # 最小方向确认数
       direction_consistency_threshold: 0.6 # 方向一致性阈值
 
-    # 统计突破 - 严格版
+    # 统计突破 - 双币种验证优化版
     statistical_breakout:
       enabled: true
-      price_deviation_threshold: 3.5  # 从2.0提高到3.5
-      momentum_ratio_threshold: 2.5   # 从2.0提高到3.0
-      min_sample_size: 200             # 新增：至少100个tick样本
+      price_deviation_threshold: 2.5  # ✅ 双币种验证最优值 (从3.5降低到2.5)
+      momentum_ratio_threshold: 2.5   # 保持不变
+      min_sample_size: 200             # 保持不变
 
-    # 连续变动突破 - 严格版
+    # 连续变动突破 - 双币种验证优化版
     consecutive_breakout:
       enabled: true
-      min_consecutive_moves: 2          # 从5增加到8
-      min_move_threshold: 0.001         # 新增：每次变动至少0.2%
+      min_consecutive_moves: 5          # ✅ 更严格 (从2提高到5)
+      min_move_threshold: 0.001         # 保持不变
 
-    # 成交量突破 - 🔧 调试优化版
+    # 成交量突破 - 双币种验证优化版
     volume_breakout:
       enabled: true
-      volume_surge_threshold: 1.2      # 🔧 更低：5%成交量增长即可触发
-      min_price_change: 0.005        # 🔧 更低：0.005%价格变动
-      min_avg_volume: 1                # 🔧 最低：不限制最小成交量
-      min_data_points: 100               # 🔧 最低：单个tick即可计算
+      volume_surge_threshold: 2.0      # ✅ 双币种验证最优值 (从1.2提高到2.0)
+      min_price_change: 0.005        # 保持不变
+      min_avg_volume: 1                # 保持不变
+      min_data_points: 100              # 保持不变
 
     # 路径突破 - 🔧 调试优化版
     path_breakout:

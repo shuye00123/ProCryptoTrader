@@ -176,6 +176,149 @@ class DirectionCoordinator:
         )
 
 
+class RealTimeQualityScorer:
+    """
+    实时信号质量评分器
+    在信号生成的毫秒级评估质量，无需等待cluster完成
+    """
+
+    def __init__(self, config: Dict):
+        """初始化质量评分器
+
+        Args:
+            config: 质量评分配置
+                - quality_threshold: 质量阈值 (默认0.75)
+                - cooldown_seconds: 冷却期秒数 (默认300)
+                - weights: 各维度权重字典
+        """
+        self.quality_threshold = config.get('quality_threshold', 0.75)
+        self.cooldown_seconds = config.get('cooldown_seconds', 300)
+
+        # 质量评分权重
+        self.weights = config.get('weights', {
+            'algo_diversity': 0.20,      # 算法多样性
+            'strength_consistency': 0.15, # 强度一致性
+            'combined_strength': 0.25,    # 综合强度
+            'volume_surge': 0.20,         # 成交量激增
+            'price_momentum': 0.20        # 价格动量
+        })
+
+        self.last_execution_time = None
+        self.logger = logging.getLogger(f"{self.__class__.__name__}")
+
+    def calculate_quality_score(self, detection_list: List, tick_data, current_time, symbol: str) -> tuple:
+        """
+        计算信号质量分数（实时，无需等待cluster）
+
+        Args:
+            detection_list: [(algo_name, strength), ...] 检测列表
+            tick_data: 当前tick数据
+            current_time: 当前时间戳
+            symbol: 交易对
+
+        Returns:
+            (quality_score, score_breakdown): 质量分数(0-1)和详细分数
+        """
+
+        scores = {}
+        weights = self.weights
+
+        # === 维度1: 算法多样性 ===
+        unique_algos = len(set(d[0] for d in detection_list))
+        algo_diversity_score = min(1.0, unique_algos / 5.0)  # 5个算法满分
+        scores['algo_diversity'] = algo_diversity_score
+
+        # === 维度2: 强度一致性 ===
+        strengths = [d[1] for d in detection_list]
+        strength_mean = np.mean(strengths)
+        strength_std = np.std(strengths)
+        strength_cv = strength_std / strength_mean if strength_mean > 0 else 1.0
+
+        # 低变异系数 = 高一致性
+        consistency_score = max(0.0, 1.0 - strength_cv)
+        scores['strength_consistency'] = consistency_score
+
+        # === 维度3: 综合强度 ===
+        combined_strength = strength_mean
+        # 归一化: 2.5是最低要求, 8.0是优秀
+        strength_score = min(1.0, max(0.0, (combined_strength - 2.5) / (8.0 - 2.5)))
+        scores['combined_strength'] = strength_score
+
+        # === 维度4: 成交量激增 ===
+        volume_detection = [d for d in detection_list if 'VOLUME' in d[0]]
+        if volume_detection:
+            volume_strength = volume_detection[0][1]
+            # volume_strength = (volume_ratio + z_score) / 2
+            volume_score = min(1.0, max(0.0, (volume_strength - 2.0) / 6.0))
+        else:
+            volume_score = 0.3  # 无成交量确认的惩罚
+        scores['volume_surge'] = volume_score
+
+        # === 维度5: 价格动量 ===
+        statistical_detection = [d for d in detection_list if 'STATISTICAL' in d[0]]
+        if statistical_detection:
+            stat_strength = statistical_detection[0][1]
+            # 高Z-score = 强突破
+            momentum_score = min(1.0, max(0.0, (stat_strength - 2.5) / 5.0))
+        else:
+            momentum_score = 0.3  # 无统计确认的惩罚
+        scores['price_momentum'] = momentum_score
+
+        # 计算加权平均
+        total_score = sum(scores[component] * weights.get(component, 0.2)
+                          for component in scores.keys())
+        total_weight = sum(weights.values())
+
+        quality_score = total_score / total_weight if total_weight > 0 else 0.0
+
+        score_breakdown = {
+            'quality_score': quality_score,
+            'algo_diversity': algo_diversity_score,
+            'strength_consistency': consistency_score,
+            'combined_strength': strength_score,
+            'volume_surge': volume_score,
+            'price_momentum': momentum_score,
+            'unique_algos': unique_algos,
+            'avg_strength': combined_strength,
+            'strength_cv': strength_cv
+        }
+
+        return quality_score, score_breakdown
+
+    def should_execute_signal(self, quality_score: float, current_time) -> tuple:
+        """
+        判断是否应该执行信号
+
+        Args:
+            quality_score: 质量分数
+            current_time: 当前时间戳
+
+        Returns:
+            (should_execute, reason): (是否执行, 原因)
+        """
+        # 检查冷却期
+        if self.last_execution_time is not None:
+            if isinstance(current_time, (int, float)):
+                time_since_last = (current_time - self.last_execution_time) / 1000.0
+            else:
+                time_since_last = (pd.Timestamp(current_time) -
+                                   pd.Timestamp(self.last_execution_time)).total_seconds()
+
+            if time_since_last < self.cooldown_seconds:
+                remaining = self.cooldown_seconds - time_since_last
+                return False, f'cooldown ({remaining:.0f}s remaining)'
+
+        # 检查质量阈值
+        if quality_score < self.quality_threshold:
+            return False, f'low quality (score={quality_score:.2f} < {self.quality_threshold})'
+
+        return True, f'high quality (score={quality_score:.2f})'
+
+    def record_execution(self, current_time):
+        """记录信号执行时间"""
+        self.last_execution_time = current_time
+
+
 # 设置日志
 logger = logging.getLogger(__name__)
 class TickBreakoutDetector:
@@ -202,7 +345,10 @@ class TickBreakoutDetector:
                  # 🔧 VOLUME算法优化参数
                  volume_config: Optional[Dict] = None,
                  # 🔧 PATH算法优化参数
-                 path_config: Optional[Dict] = None):
+                 path_config: Optional[Dict] = None,
+                 # 🔥 实时质量评分配置参数
+                 quality_scoring_enabled: bool = False,
+                 quality_scoring_config: Optional[Dict] = None):
 
         self.window_size = window_size
         self.min_breakout_strength = min_breakout_strength
@@ -291,6 +437,29 @@ class TickBreakoutDetector:
         else:
             self.direction_coordinator = None
             self.logger.info("Direction coordination disabled")
+
+        # 🔥 实时质量评分配置
+        self.quality_scoring_enabled = quality_scoring_enabled
+        if self.quality_scoring_enabled:
+            # 使用默认配置或提供自定义配置
+            default_quality_config = {
+                'quality_threshold': 0.75,
+                'cooldown_seconds': 300,
+                'weights': {
+                    'algo_diversity': 0.20,
+                    'strength_consistency': 0.15,
+                    'combined_strength': 0.25,
+                    'volume_surge': 0.20,
+                    'price_momentum': 0.20
+                }
+            }
+
+            final_quality_config = quality_scoring_config or default_quality_config
+            self.quality_scorer = RealTimeQualityScorer(final_quality_config)
+            self.logger.info(f"Quality scoring enabled with config: {final_quality_config}")
+        else:
+            self.quality_scorer = None
+            self.logger.info("Quality scoring disabled")
 
         self.logger.info(f"TickBreakoutDetector initialized with webhook: {enable_webhook}")
 
@@ -668,13 +837,78 @@ class TickBreakoutDetector:
                 # 生成最终确认信号 - 每个交易对独立
                 combined_types = "+".join([d['type'] for d in self.pending_signals[symbol]])
                 self.logger.info(f"[DEBUG] 检测算法结果 - {symbol}: {', '.join(detection_results)}")
-                return self.create_breakout_signal(
+
+                # 🔥 实时质量评分 - 在信号生成时立即评估质量
+                if self.quality_scoring_enabled and self.quality_scorer:
+                    # 准备检测列表（去重）
+                    unique_detections = list(set((d['type'], d['strength']) for d in self.pending_signals[symbol]))
+
+                    # 计算质量分数
+                    quality_score, score_breakdown = self.quality_scorer.calculate_quality_score(
+                        unique_detections,
+                        tick,
+                        current_time,
+                        symbol
+                    )
+
+                    # 判断是否应该执行
+                    should_execute, reason = self.quality_scorer.should_execute_signal(
+                        quality_score,
+                        current_time
+                    )
+
+                    self.logger.info(f"[QUALITY] {symbol} - Score: {quality_score:.3f}, "
+                                   f"Decision: {should_execute}, Reason: {reason}")
+
+                    # 输出详细分数
+                    self.logger.debug(f"[QUALITY] Breakdown - "
+                                     f"Diversity: {score_breakdown['algo_diversity']:.2f}, "
+                                     f"Consistency: {score_breakdown['strength_consistency']:.2f}, "
+                                     f"Strength: {score_breakdown['combined_strength']:.2f}, "
+                                     f"Volume: {score_breakdown['volume_surge']:.2f}, "
+                                     f"Momentum: {score_breakdown['price_momentum']:.2f}")
+
+                    # 只执行高质量信号
+                    if not should_execute:
+                        self.logger.info(f"[FILTERED] Signal filtered by quality scoring: {reason}")
+                        return None
+
+                    # 记录执行时间（用于冷却期）
+                    self.quality_scorer.record_execution(current_time)
+
+                    # 在signal metadata中添加质量评分信息
+                    # 通过修改create_breakout_signal的metadata参数
+                    quality_metadata = {
+                        'quality_score': quality_score,
+                        'quality_breakdown': score_breakdown,
+                        'quality_threshold': self.quality_scorer.quality_threshold
+                    }
+                else:
+                    quality_metadata = {}
+
+                signal = self.create_breakout_signal(
                     tick,
                     f"MULTI_CONFIRMED_{self.min_confirmation_count}ALGOS",
                     symbol,
                     combined_types,
                     avg_strength
                 )
+
+                # 添加质量评分metadata到signal
+                if signal and quality_metadata:
+                    signal.metadata.update(quality_metadata)
+
+                # 🔥 webhook推送：只有通过质量评分的信号才发送webhook通知
+                if self.enable_webhook and self.webhook and signal:
+                    # 构建action和reason用于webhook
+                    action = "UPWARD_BREAKOUT" if signal.signal_type == SignalType.OPEN_LONG else "DOWNWARD_BREAKOUT"
+                    reason = f"MULTI_CONFIRMED_{self.min_confirmation_count}ALGOS"
+
+                    self.logger.info(f"[WEBHOOK] Sending notification for high-quality signal: "
+                                   f"{symbol}, Quality={quality_score:.3f}")
+                    self._send_webhook_notification(signal, tick, reason, action, symbol)
+
+                return signal
 
         return None
 
@@ -1736,9 +1970,8 @@ class TickBreakoutDetector:
             }
         )
 
-        # 🔥 发送webhook通知
-        if self.enable_webhook and self.webhook:
-            self._send_webhook_notification(signal, tick, reason, action, symbol)
+        # 🔧 webhook推送迁移：不在生成信号时推送，而是在质量评分确认后推送
+        # webhook推送逻辑已迁移到 detect_multi_dimensional_breakout() 方法中
 
         return signal
 
