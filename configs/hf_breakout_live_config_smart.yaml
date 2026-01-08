@@ -29,40 +29,40 @@ strategy:
   max_total_exposure: 0.15
   signal_cooldown: 30
 
-  # ⭐ 智能Tick级别突破检测配置
+  # ⭐ 智能Tick级别突破检测配置（严格版 - 基于BABYUSDT/GUNUSDT数据分析）
   tick_breakout:
     enabled: true
     window_size: 200
-    min_breakout_strength: 2.5
+    min_breakout_strength: 3.0         # ✅ 从2.5提高到3.0（更强的突破强度）
     volume_threshold: 2.0
     consecutive_moves_threshold: 5
-    breakout_cooldown: 30000  # ✅ 从3秒增加到30秒（防止重复信号）
+    breakout_cooldown: 30000           # 30秒冷却期（防止重复信号）
 
-    # 多重确认机制
+    # 多重确认机制（更严格）
     require_multiple_confirmation: true
-    min_confirmation_count: 2          # 保持2个确认
-    confirmation_window: 4000         # 4秒确认窗口
+    min_confirmation_count: 3          # ✅ 从2提高到3（要求3个算法确认）
+    confirmation_window: 5000         # ✅ 从4秒增加到5秒（更宽松的确认窗口）
 
-    # ⭐ 关键：启用质量评分系统（基于BABYUSDT数据验证）
+    # ⭐ 关键：启用质量评分系统（基于BABYUSDT数据验证的严格版）
     quality_scoring:
-      enabled: true                    # ✅ 启用质量评分（关键！）
-      quality_threshold: 0.75          # ✅ 平衡阈值（不太严格）
-      cooldown_seconds: 300           # 5分钟冷却期
+      enabled: true                    # ✅ 启用质量评分
+      quality_threshold: 0.80          # ✅ 从0.75提高到0.80（更严格）
+      cooldown_seconds: 300           # 5分钟全局冷却期
 
-      # ⭐ 优化的权重配置（基于BABYUSDT突破特征）
+      # ⭐ 严格版权重配置（基于真突破特征分析）
       weights:
-        algo_diversity: 0.25           # ✅ 提高算法多样性权重（25%）
-        strength_consistency: 0.15      # 保持不变
-        combined_strength: 0.25        # 保持不变
-        volume_surge: 0.30             # ✅ 提高成交量激增权重（30%，关键！）
-        price_momentum: 0.05           # ✅ 降低价格动量权重（5%）
+        algo_diversity: 0.25           # 算法多样性权重（25%）
+        strength_consistency: 0.15      # 强度一致性权重（15%）
+        combined_strength: 0.20        # ✅ 从0.25降低到0.20（降低综合强度权重）
+        volume_surge: 0.35             # ✅ 从0.30提高到0.35（提高成交量权重，关键！）
+        price_momentum: 0.05           # 价格动量权重（5%）
 
-    # ⭐ 方向协调机制（适中配置）
+    # ⭐ 方向协调机制（严格版）
     direction_coordination:
       enabled: true
-      min_consensus_score: 0.50       # ✅ 适中阈值（平衡质量和数量）
-      conflict_penalty: 0.18          # ✅ 适中冲突惩罚
-      max_conflicting_algos: 3        # ✅ 最多3个冲突算法
+      min_consensus_score: 0.60       # ✅ 从0.50提高到0.60（更严格）
+      conflict_penalty: 0.20          # ✅ 从0.18提高到0.20（更严格冲突惩罚）
+      max_conflicting_algos: 2        # ✅ 从3降低到2（更少冲突容忍）
 
       algorithm_weights:
         STATISTICAL: 0.25
@@ -77,24 +77,24 @@ strategy:
       min_direction_confirmations: 2
       direction_consistency_threshold: 0.65  # ✅ 要求65%方向一致性
 
-    # ⭐ 统计突破（针对真正突破优化）
+    # ⭐ 统计突破（严格版 - 基于真突破特征）
     statistical_breakout:
       enabled: true
-      price_deviation_threshold: 2.8  # ✅ 适中阈值（过滤弱突破，不漏掉强突破）
+      price_deviation_threshold: 3.0  # ✅ 从2.8提高到3.0（更强的价格突破要求）
       momentum_ratio_threshold: 2.5
       min_sample_size: 200
 
-    # ⭐ 连续变动突破（适中）
+    # ⭐ 连续变动突破（严格版）
     consecutive_breakout:
       enabled: true
-      min_consecutive_moves: 4        # ✅ 适中要求
+      min_consecutive_moves: 5        # ✅ 从4提高到5（更严格）
       min_move_threshold: 0.001
 
-    # ⭐ 关键：成交量突破（针对BABYUSDT级别突破优化）
+    # ⭐ 关键：成交量突破（严格版 - 基于BABYUSDT数据分析）
     volume_breakout:
       enabled: true
-      volume_surge_threshold: 3.0     # ✅ 关键：要求3倍成交量（过滤假突破）
-      min_price_change: 0.008         # ✅ 关键：要求0.8%价格变动（过滤噪音）
+      volume_surge_threshold: 5.0     # ✅ 从3.0提高到5.0（关键！真突破Vol>=8.11x中位数）
+      min_price_change: 0.010         # ✅ 从0.008提高到0.010（1%价格变动）
       min_avg_volume: 1
       min_data_points: 100
 
