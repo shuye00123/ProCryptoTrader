@@ -297,7 +297,7 @@ output:
 
   # 报告配置
   generate_reports: true
-  report_interval: 300  # 5分钟
+  report_interval: 120  # 5分钟
 
   # 统计数据
   save_stats: true
