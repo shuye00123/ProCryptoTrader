@@ -1,0 +1,278 @@
+# 高频突破策略实盘交易配置
+# 智能突破版本：基于BABYUSDT数据分析，能够捕捉真正放量突破
+
+# 基础配置
+basic:
+  mode: "paper"
+  strategy: "HighFrequencyBreakout"
+  initial_balance: 10000.0
+  max_drawdown: 0.1
+  max_daily_loss: 0.03
+
+# 交易规模配置
+trading:
+  target_trade_value_usdt: 100.0
+  min_trade_value_usdt: 50.0
+  max_trade_value_usdt: 500.0
+  max_total_value_usdt: 1000.0
+  max_daily_value_usdt: 2000.0
+
+# 策略配置
+strategy:
+  name: "HighFrequencyBreakoutStrategy"
+  class: "HighFrequencyBreakout"
+
+  # 基础参数
+  max_positions: 3
+  position_size: 0.02
+  max_position_size: 0.05
+  max_total_exposure: 0.15
+  signal_cooldown: 30
+
+  # ⭐ 智能Tick级别突破检测配置
+  tick_breakout:
+    enabled: true
+    window_size: 200
+    min_breakout_strength: 2.5
+    volume_threshold: 2.0
+    consecutive_moves_threshold: 5
+    breakout_cooldown: 3000
+
+    # 多重确认机制
+    require_multiple_confirmation: true
+    min_confirmation_count: 2          # 保持2个确认
+    confirmation_window: 4000         # 4秒确认窗口
+
+    # ⭐ 关键：启用质量评分系统（基于BABYUSDT数据验证）
+    quality_scoring:
+      enabled: true                    # ✅ 启用质量评分（关键！）
+      quality_threshold: 0.75          # ✅ 平衡阈值（不太严格）
+      cooldown_seconds: 300           # 5分钟冷却期
+
+      # ⭐ 优化的权重配置（基于BABYUSDT突破特征）
+      weights:
+        algo_diversity: 0.25           # ✅ 提高算法多样性权重（25%）
+        strength_consistency: 0.15      # 保持不变
+        combined_strength: 0.25        # 保持不变
+        volume_surge: 0.30             # ✅ 提高成交量激增权重（30%，关键！）
+        price_momentum: 0.05           # ✅ 降低价格动量权重（5%）
+
+    # ⭐ 方向协调机制（适中配置）
+    direction_coordination:
+      enabled: true
+      min_consensus_score: 0.50       # ✅ 适中阈值（平衡质量和数量）
+      conflict_penalty: 0.18          # ✅ 适中冲突惩罚
+      max_conflicting_algos: 3        # ✅ 最多3个冲突算法
+
+      algorithm_weights:
+        STATISTICAL: 0.25
+        MOMENTUM: 0.1
+        CONSECUTIVE: 0.1
+        VOLUME: 0.35
+        PATH: 0.2
+
+      min_confidence_threshold: 0.25
+      direction_penalty_threshold: 0.5
+      direction_confirmation_window: 2000
+      min_direction_confirmations: 2
+      direction_consistency_threshold: 0.65  # ✅ 要求65%方向一致性
+
+    # ⭐ 统计突破（针对真正突破优化）
+    statistical_breakout:
+      enabled: true
+      price_deviation_threshold: 2.8  # ✅ 适中阈值（过滤弱突破，不漏掉强突破）
+      momentum_ratio_threshold: 2.5
+      min_sample_size: 200
+
+    # ⭐ 连续变动突破（适中）
+    consecutive_breakout:
+      enabled: true
+      min_consecutive_moves: 4        # ✅ 适中要求
+      min_move_threshold: 0.001
+
+    # ⭐ 关键：成交量突破（针对BABYUSDT级别突破优化）
+    volume_breakout:
+      enabled: true
+      volume_surge_threshold: 3.0     # ✅ 关键：要求3倍成交量（过滤假突破）
+      min_price_change: 0.008         # ✅ 关键：要求0.8%价格变动（过滤噪音）
+      min_avg_volume: 1
+      min_data_points: 100
+
+    # 路径突破
+    path_breakout:
+      enabled: true
+      breakout_threshold: 0.005
+      support_resistance_window: 50
+      min_data_points: 50
+      virtual_level_offset: 0.001
+
+  # 原有突破检测器（保持关闭）
+  breakout:
+    enabled: false
+    lookback_period: 50
+    volume_threshold: 1.5
+    volatility_threshold: 0.02
+    momentum_threshold: 0.01
+    support_resistance_lookback: 100
+    min_breakout_strength: 0.6
+
+  # 风险管理
+  risk_management:
+    max_drawdown: 0.1
+    max_daily_loss: 0.03
+    position_risk_limit: 0.02
+    use_trailing_stop: true
+    trailing_stop_distance: 0.02
+
+  # 信号过滤器
+  signal_filters:
+    enabled: true
+    min_signal_quality: 0.6
+    max_signals_per_minute: 2
+    duplicate_signal_filter: true
+    require_volume_confirmation: true
+    min_confirmation_count: 2
+    quality_score_threshold: 0.75
+
+# 交易所配置
+exchange:
+  api_key: ""
+  api_secret: ""
+  sandbox: false
+  testnet: false
+
+  websocket:
+    reconnect_attempts: 10
+    reconnect_delay: 5000
+    connection_timeout: 10000
+    ping_interval: 30000
+    subscription_limit: 100
+
+# 执行引擎配置
+execution:
+  enable_batch_execution: false
+  default_timeout: 5000
+  max_queue_size: 1000
+  enable_order_validation: true
+  default_priority: "HIGH"
+  max_retries: 2
+  retry_delay: 100
+
+# 监控和统计
+monitoring:
+  enable_performance_monitoring: true
+  stats_update_interval: 10
+  log_level: "INFO"
+  log_executed_orders: true
+  log_signal_details: true
+  enable_realtime_stats: true
+  stats_save_interval: 300
+
+# 交易对配置
+symbols:
+  - "BTC-USDT"
+  - "ETH-USDT"
+  - "BNB-USDT"
+
+# WebSocket订阅配置
+websocket_subscribe:
+  enabled: false
+  whitelist:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+    - "SOLUSDT"
+    - "ADAUSDT"
+    - "AVAXUSDT"
+    - "DOTUSDT"
+    - "MATICUSDT"
+    - "LINKUSDT"
+    - "ATOMUSDT"
+
+# 风险控制
+risk_control:
+  max_position_value: 1000
+  max_total_position_value: 3000
+  default_stop_loss: 0.05
+  default_take_profit: 0.1
+  max_holding_time: 3600
+  max_volatility_threshold: 0.05
+  volatility_stop: true
+
+# 数据源配置
+data_source:
+  type: "binance"
+  websocket_url: "wss://testnet.binance.vision/ws/btcusdt@ticker"
+  rest_url: "https://testnet.binance.vision"
+  enable_data_validation: true
+  max_data_delay: 1000
+
+# 输出配置
+output:
+  save_results: true
+  results_dir: "./results/hf_breakout"
+  generate_reports: true
+  report_interval: 300
+  save_stats: true
+  stats_format: "json"
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/hf_breakout_live.log"
+  max_file_size: "10MB"
+  backup_count: 5
+  console: true
+  modules:
+    "HighFrequencyTrader": "INFO"
+    "core.strategy.high_frequency_breakout": "INFO"
+    "core.trading.fast_execution": "INFO"
+    "core.strategy.tick_breakout_detector": "INFO"
+
+# 通知配置
+notifications:
+  enabled: false
+  webhook_url: ""
+  events:
+    - "signal_generated"
+    - "order_executed"
+    - "risk_limit_hit"
+    - "system_error"
+
+# Tick数据转存配置
+tick_data_persistence:
+  enabled: true
+  save_interval_seconds: 120
+
+  storage:
+    base_path: "data/tick"
+    exchange: "binance"
+    compression: "snappy"
+    file_split_hours: 1
+
+  buffer:
+    max_size_mb: 150
+    max_ticks_per_symbol: 50000
+    cleanup_ratio: 0.8
+
+  performance:
+    batch_size: 5000
+    max_concurrent_writes: 1
+    write_timeout_seconds: 120
+
+  integrity:
+    enable_validation: true
+    checksum_enabled: true
+    auto_repair: false
+
+  monitoring:
+    enable_metrics: true
+    log_level: "INFO"
+    alert_memory_threshold: 80
+
+  streaming_queue:
+    enabled: true
+    temp_dir: "data/temp"
+    max_workers: 2
+    cleanup_on_startup: true

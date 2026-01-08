@@ -297,7 +297,7 @@ output:
 
   # 报告配置
   generate_reports: true
-  report_interval: 120  # 5分钟
+  report_interval: 300  # 5分钟
 
   # 统计数据
   save_stats: true
@@ -339,7 +339,7 @@ notifications:
 tick_data_persistence:
   # 基础配置
   enabled: true                    # 是否启用转存功能
-  save_interval_seconds: 300       # 转存间隔(5分钟) - V2.0: 降低频率减少任务创建
+  save_interval_seconds: 120       # 转存间隔(5分钟) - V2.0: 降低频率减少任务创建
 
   # 存储配置
   storage:
