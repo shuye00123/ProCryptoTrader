@@ -36,7 +36,7 @@ strategy:
     min_breakout_strength: 2.5
     volume_threshold: 2.0
     consecutive_moves_threshold: 5
-    breakout_cooldown: 3000
+    breakout_cooldown: 30000  # ✅ 从3秒增加到30秒（防止重复信号）
 
     # 多重确认机制
     require_multiple_confirmation: true
