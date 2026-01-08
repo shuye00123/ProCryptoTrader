@@ -45,32 +45,32 @@ strategy:
     min_breakout_strength: 2.5  # ✅ 双币种验证最优值 (从2.0提高到2.5)
     volume_threshold: 2.0  # ✅ 双币种中位数验证 (从1.3提高到2.0)
     consecutive_moves_threshold: 5  # 连续变动阈值 (保持不变)
-    breakout_cooldown: 3000  # 突破冷却期 (保持不变)
+    breakout_cooldown: 30000  # ✅ 从3秒增加到30秒（防止重复信号）
 
     # 多重确认机制
     require_multiple_confirmation: true
     min_confirmation_count: 3  # ✅ 从2提高到3 (更严格)
     confirmation_window: 5000
 
-    # 🔥 实时质量评分配置 (新增 - 可配置)
+    # 🔥 实时质量评分配置 (基于BABYUSDT数据分析优化)
     quality_scoring:
-      enabled: false  # 🔧 默认关闭，测试后开启
-      quality_threshold: 0.80  # ✅ 保守型配置：只交易最高质量信号
-      cooldown_seconds: 300  # 执行冷却期 (秒)
+      enabled: true  # ✅ 启用质量评分（关键！激活300秒全局冷却期）
+      quality_threshold: 0.75  # ✅ 平衡阈值（不过于严格）
+      cooldown_seconds: 300  # 5分钟全局冷却期（防止重复信号）
 
-      # 质量评分权重配置
+      # ⭐ 优化的权重配置（基于BABYUSDT突破特征分析）
       weights:
-        algo_diversity: 0.20      # 算法多样性权重
-        strength_consistency: 0.15 # 强度一致性权重
-        combined_strength: 0.25    # 综合强度权重
-        volume_surge: 0.20         # 成交量激增权重
-        price_momentum: 0.20       # 价格动量权重
+        algo_diversity: 0.25      # ✅ 提高算法多样性权重（25%）
+        strength_consistency: 0.15 # 保持不变
+        combined_strength: 0.25    # 保持不变
+        volume_surge: 0.30         # ✅ 提高成交量激增权重（30%，关键！）
+        price_momentum: 0.05       # ✅ 降低价格动量权重（5%）
 
-    # 🔥 方向协调机制
+    # 🔥 方向协调机制（适中配置）
     direction_coordination:
-      enabled: true                     # 默认禁用，向后兼容
-      min_consensus_score: 0.65          # 最小共识强度
-      conflict_penalty: 0.2             # 冲突惩罚系数
+      enabled: true                     # ✅ 启用方向协调
+      min_consensus_score: 0.50         # ✅ 适中阈值（平衡质量和数量）
+      conflict_penalty: 0.18            # ✅ 适中冲突惩罚
       max_conflicting_algos: 3          # 最大冲突算法数量
 
       # 完全可配置的算法权重
@@ -106,8 +106,8 @@ strategy:
     # 成交量突破 - 双币种验证优化版
     volume_breakout:
       enabled: true
-      volume_surge_threshold: 2.0      # ✅ 双币种验证最优值 (从1.2提高到2.0)
-      min_price_change: 0.005        # 保持不变
+      volume_surge_threshold: 3.0      # ✅ 提高到3.0（过滤假突破，捕捉真突破）
+      min_price_change: 0.008         # ✅ 提高到0.8%（过滤噪音）
       min_avg_volume: 1                # 保持不变
       min_data_points: 100              # 保持不变
 

@@ -515,6 +515,10 @@ class TickBreakoutDetector:
 
             if breakout_signal:
                 self.last_breakout_times[symbol] = current_time  # 更新该交易对的冷却期
+                # ✅ 清空pending_signals防止确认窗口内重复生成信号
+                if symbol in self.pending_signals:
+                    self.pending_signals[symbol] = []
+
                 self.logger.info(f"[SIGNAL] Tick突破信号生成: {symbol} - {breakout_signal.reason}")
                 self.logger.debug(f"[SIGNAL] 信号详情: 类型={breakout_signal.signal_type}, "
                                  f"价格={breakout_signal.price}, "
