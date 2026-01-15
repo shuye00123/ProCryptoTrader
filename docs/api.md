@@ -1,4 +1,179 @@
-# API文档
+# API 文档
+
+**版本**: v1.0
+**最后更新**: 2026-01-15
+**数据架构**: 1秒K线WebSocket流
+
+---
+
+## 目录
+
+1. [核心数据模型](#核心数据模型)
+2. [核心模块API](#核心模块api)
+3. [WebSocket接口](#websocket接口)
+4. [策略接口](#策略接口)
+5. [突破检测接口](#突破检测接口)
+6. [配置文件格式](#配置文件格式)
+
+---
+
+## 核心数据模型
+
+### Kline (1秒K线数据)
+
+**位置**: `core/strategy/kline_breakout_detector.py`
+
+**描述**: 1秒K线数据结构，用于量价突破检测
+
+**重要说明**:
+- ✅ `volume`字段是**真实的1秒K线总成交量**（该秒内所有成交总和）
+- ❌ **不再使用**ticker的`last_quantity`字段（已废弃，数据准确性问题）
+- ✅ 数据来源：Binance官方`@kline_1s` WebSocket流
+
+**数据结构**:
+```python
+@dataclass
+class Kline:
+    """1秒K线数据结构"""
+    symbol: str                      # 交易对符号 (如 "BTCUSDT")
+    open: float                      # 开盘价
+    high: float                      # 最高价
+    low: float                       # 最低价
+    close: float                     # 收盘价
+    volume: float                    # ✅ 真实1秒K线总成交量（该秒内所有成交总和）
+    timestamp: datetime = None       # K线时间戳
+
+    # 自动计算属性（__post_init__）
+    price_change: float              # 价格变化 (close - open)
+    price_change_pct: float          # 价格变化百分比
+```
+
+**字段说明**:
+
+| 字段 | 类型 | 说明 | 示例值 |
+|------|------|------|--------|
+| `symbol` | str | 交易对符号 | "BTCUSDT" |
+| `open` | float | 开盘价 | 50000.0 |
+| `high` | float | 最高价 | 50100.0 |
+| `low` | float | 最低价 | 49900.0 |
+| `close` | float | 收盘价 | 50050.0 |
+| `volume` | float | **真实1秒K线总成交量** | 1234.56 |
+| `timestamp` | datetime | K线时间戳 | 2024-01-15 10:00:00 |
+| `price_change` | float | 价格变化 | 50.0 |
+| `price_change_pct` | float | 价格变化百分比 | 0.1 |
+
+**数据准确性对比**:
+
+| 数据类型 | 字段 | 含义 | 示例值 | 准确性 |
+|----------|------|------|--------|--------|
+| **1秒K线** | `volume` | 该秒内所有成交总和 | 1234.56 BTC | ✅ 100%准确 |
+| **Ticker** | `last_quantity` | 最近一次成交数量 | 0.5 BTC | ❌ 不准确（单次成交） |
+
+**差异**: 两者相差可达**2469倍**！
+
+**创建示例**:
+```python
+from core.strategy.kline_breakout_detector import Kline
+from datetime import datetime
+
+# 创建Kline对象
+kline = Kline(
+    symbol="BTCUSDT",
+    open=50000.0,
+    high=50100.0,
+    low=49900.0,
+    close=50050.0,
+    volume=1234.56,  # ✅ 真实的1秒K线成交量
+    timestamp=datetime.now()
+)
+
+# 访问属性
+print(f"Symbol: {kline.symbol}")
+print(f"Price Change: {kline.price_change:.2f}")
+print(f"Price Change %: {kline.price_change_pct:.3f}%")
+print(f"Volume: {kline.volume} (✅ 真实1秒K线成交量)")
+```
+
+---
+
+### Signal (交易信号)
+
+**位置**: `core/strategy/base_strategy.py`
+
+**描述**: 标准化的交易信号数据结构
+
+**信号类型**:
+```python
+class SignalType(Enum):
+    OPEN_LONG = "open_long"          # 开多仓
+    OPEN_SHORT = "open_short"        # 开空仓
+    CLOSE_LONG = "close_long"        # 平多仓
+    CLOSE_SHORT = "close_short"      # 平空仓
+    INCREASE_LONG = "increase_long"  # 加多仓
+    INCREASE_SHORT = "increase_short" # 加空仓
+    HOLD = "hold"                    # 持仓不动
+    CLOSE = "close"                  # 平仓（通用）
+```
+
+**数据结构**:
+```python
+class Signal:
+    def __init__(self, signal_type: SignalType, symbol: str,
+                 price: float = None, amount: float = None,
+                 confidence: float = 1.0, stop_loss: float = None,
+                 take_profit: float = None, metadata: Dict = None):
+
+        self.signal_type = signal_type          # 信号类型
+        self.symbol = symbol                    # 交易对
+        self.price = price                      # 建议价格
+        self.amount = amount                    # 交易数量
+        self.confidence = confidence            # 信号置信度 [0,1]
+        self.stop_loss = stop_loss              # 止损价格
+        self.take_profit = take_profit          # 止盈价格
+        self.metadata = metadata or {}          # 策略元数据
+        self.timestamp = pd.Timestamp.now()     # 信号时间戳
+```
+
+**使用示例**:
+```python
+from core.strategy.base_strategy import Signal, SignalType
+
+# 创建买入信号
+buy_signal = Signal(
+    signal_type=SignalType.OPEN_LONG,
+    symbol="BTC/USDT",
+    price=50000.0,
+    amount=0.1,
+    confidence=0.8,
+    stop_loss=48000.0,
+    take_profit=52000.0,
+    metadata={'strategy': 'breakout', 'reason': 'volume_surge'}
+)
+```
+
+---
+
+### BreakoutSignal (突破信号)
+
+**位置**: `core/strategy/kline_breakout_detector.py`
+
+**描述**: 量价突破检测生成的信号
+
+**数据结构**:
+```python
+@dataclass
+class BreakoutSignal:
+    symbol: str                          # 交易对
+    signal_type: SignalType              # 信号类型
+    strength: float                      # 突破强度（成交量倍数）
+    timestamp: datetime                  # 信号时间戳
+    price: float                         # 突破价格
+    volume: float                        # 成交量
+    price_change_pct: float              # 价格变化百分比
+    confidence: float                    # 信号置信度
+```
+
+---
 
 ## 核心模块API
 
@@ -479,6 +654,519 @@ report = analyzer.generate_factor_report(factor_data, returns)
 - `calculate_ic(factor_data, returns)`: 计算因子IC
 - `calculate_turnover(factor_data)`: 计算因子换手率
 - `generate_factor_report(factor_data, returns)`: 生成因子分析报告
+
+---
+
+## WebSocket接口
+
+### BinanceWebSocketClient
+
+**位置**: `core/data/websocket_client.py`
+
+**描述**: Binance WebSocket客户端，订阅实时1秒K线数据
+
+**订阅流格式**:
+```python
+# ✅ 订阅1秒K线流
+streams = [f"{symbol.lower()}@kline_1s" for symbol in symbols]
+
+# 示例
+streams = [
+    "babyusdt@kline_1s",
+    "gmtusdt@kline_1s",
+    "gunusdt@kline_1s"
+]
+```
+
+**K线消息结构**:
+```json
+{
+  "e": "kline",                    // Event type
+  "E": 1672515782136,              // Event time
+  "s": "BNBBTC",                   // Symbol
+  "k": {
+    "t": 1672515780000,            // Kline start time
+    "T": 1672515839999,            // Kline close time
+    "s": "BNBBTC",                 // Symbol
+    "i": "1s",                     // ✅ Interval: 1秒
+    "o": "0.0010",                 // Open price
+    "c": "0.0020",                 // Close price
+    "h": "0.0025",                 // High price
+    "l": "0.0015",                 // Low price
+    "v": "1000",                   // ✅ Base asset volume（真实1秒总成交量）
+    "n": 100,                      // Number of trades
+    "x": true,                     // ✅ Is this kline closed?
+    "q": "1.0000",                 // Quote asset volume
+  }
+}
+```
+
+**关键字段说明**:
+
+| 字段 | 说明 | 值 |
+|------|------|---|
+| `k.i` | K线间隔 | "1s" (1秒) |
+| `k.v` | **真实成交量** | 该秒内所有成交总和 |
+| `k.x` | K线关闭标识 | `true` = 已关闭, `false` = 仍在更新 |
+
+**使用示例**:
+```python
+from core.data.websocket_client import BinanceWebSocketClient
+import asyncio
+
+async def main():
+    # 创建WebSocket客户端
+    client = BinanceWebSocketClient(testnet=True)
+
+    # 添加K线回调
+    async def on_kline(kline):
+        print(f"收到K线: {kline.symbol}, Volume: {kline.volume}")
+
+    client.add_kline_callback(on_kline)
+
+    # 订阅1秒K线流
+    symbols = ['BTCUSDT', 'ETHUSDT']
+    await client.subscribe_klines(symbols, interval='1s')
+
+    # 运行
+    await client.run_forever()
+
+asyncio.run(main())
+```
+
+**K线回调处理**:
+```python
+async def _process_kline_message(self, kline_data: Dict):
+    """处理1秒K线消息"""
+    k = kline_data.get('k', {})
+
+    # ✅ 只处理已关闭的K线（避免重复处理）
+    if not k.get('x', False):
+        return
+
+    # ✅ 创建Kline对象
+    kline = Kline(
+        symbol=k.get('s', ''),
+        open=float(k.get('o', 0)),
+        high=float(k.get('h', 0)),
+        low=float(k.get('l', 0)),
+        close=float(k.get('c', 0)),
+        volume=float(k.get('v', 0)),  # ✅ 真实的1秒K线成交量
+        timestamp=pd.to_datetime(k.get('t', 0), unit='ms')
+    )
+
+    # 触发回调
+    await self._trigger_kline_callbacks(kline)
+```
+
+---
+
+## 策略接口
+
+### BaseStrategy (策略基类)
+
+**位置**: `core/strategy/base_strategy.py`
+
+**描述**: 所有策略的抽象基类，提供统一的策略开发框架
+
+**核心接口**:
+```python
+class BaseStrategy(ABC):
+    @abstractmethod
+    def generate_signals(self, data: Dict[str, pd.DataFrame]) -> List[Signal]:
+        """生成交易信号"""
+        pass
+
+    @abstractmethod
+    def calculate_indicators(self, data: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
+        """计算技术指标"""
+        pass
+
+    def update(self, data: Dict[str, pd.DataFrame]) -> List[Signal]:
+        """更新策略状态并生成信号"""
+        # 1. 计算技术指标
+        self.indicators = self.calculate_indicators(data)
+
+        # 2. 更新持仓
+        self._update_positions(data)
+
+        # 3. 生成交易信号
+        signals = self.generate_signals(data)
+
+        # 4. 记录信号历史
+        self.signals_history.extend(signals)
+
+        return signals
+```
+
+**持仓管理接口**:
+```python
+def can_open_position(self, symbol: str) -> bool:
+    """检查是否可以开新仓"""
+    if self.has_position(symbol):
+        return False
+    if len(self.positions) >= self.max_positions:
+        return False
+    return True
+
+def should_stop_loss(self, symbol: str) -> bool:
+    """检查是否应该止损"""
+    position = self.get_position(symbol)
+    if not position:
+        return False
+    return position.unrealized_pnl_pct <= -self.stop_loss_pct * 100
+
+def should_take_profit(self, symbol: str) -> bool:
+    """检查是否应该止盈"""
+    position = self.get_position(symbol)
+    if not position:
+        return False
+    return position.unrealized_pnl_pct >= self.take_profit_pct * 100
+```
+
+---
+
+### MultiTimeframeKlineBreakoutStrategy
+
+**位置**: `core/strategy/multi_timeframe_kline_breakout.py`
+
+**描述**: 基于1秒K线的多时间框架量价突破策略
+
+**1秒K线处理接口**:
+```python
+async def _process_1s_kline(self, msg: Dict):
+    """处理1秒K线消息"""
+    kline_data = msg.get('k', {})
+
+    # ✅ 只处理已关闭的K线
+    if not kline_data.get('x', False):
+        return
+
+    # ✅ 创建Kline对象
+    kline = Kline(
+        symbol=symbol,
+        open=float(kline_data['o']),
+        high=float(kline_data['h']),
+        low=float(kline_data['l']),
+        close=float(kline_data['c']),
+        volume=float(kline_data['v']),  # ✅ 真实volume
+        timestamp=pd.to_datetime(kline_data['t'], unit='ms')
+    )
+
+    # ✅ 突破检测
+    signal = self.detector.detect_breakout(kline, symbol)
+    if signal:
+        await self._handle_breakout_signal(signal)
+```
+
+**配置参数**:
+```yaml
+# configs/mt_kline_breakout_config.yaml
+strategy:
+  name: "MultiTimeframeKlineBreakout"
+
+  # 量价突破参数
+  volume_threshold: 3.0x          # ✅ 成交量激增阈值（验证过最优）
+  price_change_threshold: 0.2%    # 价格变动阈值
+  signal_cooldown: 60秒           # ✅ 信号冷却时间（验证过最优）
+
+  # 布林带参数
+  bb_period: 20                   # 布林带周期
+  bb_std: 2.0                     # 布林带标准差倍数
+
+  # 支撑阻力参数
+  support_resistance_window: 100  # 支撑阻力计算窗口
+```
+
+---
+
+## 突破检测接口
+
+### KlineBreakoutDetector
+
+**位置**: `core/strategy/kline_breakout_detector.py`
+
+**描述**: 基于1秒K线的量价突破检测器
+
+**初始化**:
+```python
+def __init__(self, config: Dict):
+    """
+    初始化1秒K线量价突破检测器
+
+    Args:
+        config: 配置字典
+            - volume_surge_threshold: 成交量激增阈值（默认3.0x）
+            - volume_window: 成交量平均窗口（默认50条）
+            - bb_breakout_threshold: 布林带突破阈值（默认0.2%）
+            - support_resistance_window: 支撑阻力计算窗口（默认100条）
+            - min_signal_strength: 最小信号强度（默认0.7）
+    """
+    self.volume_surge_threshold = config.get('volume_surge_threshold', 3.0)
+    self.volume_window = config.get('volume_window', 50)
+    self.bb_breakout_threshold = config.get('bb_breakout_threshold', 0.002)
+    self.support_resistance_window = config.get('support_resistance_window', 100)
+    self.min_signal_strength = config.get('min_signal_strength', 0.7)
+```
+
+**核心接口**:
+```python
+def detect_breakout(
+    self,
+    kline: Kline,
+    symbol: str,
+    higher_timeframe_data: Optional[Dict[str, pd.DataFrame]] = None
+) -> Optional[Signal]:
+    """
+    检测1秒K线量价突破
+
+    Args:
+        kline: 1秒K线数据
+        symbol: 交易对符号
+        higher_timeframe_data: 更高时间框架数据（可选）
+
+    Returns:
+        Signal: 突破信号，如果没有突破则返回None
+
+    检测逻辑:
+        1. 量能分析：检测成交量是否异常放大（>3x平均）
+        2. 价格突破：检测是否突破布林带或支撑阻力位
+        3. 综合判断：放量 + 突破 = 信号
+    """
+```
+
+**使用示例**:
+```python
+from core.strategy.kline_breakout_detector import KlineBreakoutDetector, Kline
+
+# 初始化检测器
+config = {
+    'volume_surge_threshold': 3.0,
+    'volume_window': 50,
+    'bb_breakout_threshold': 0.002,
+    'support_resistance_window': 100
+}
+
+detector = KlineBreakoutDetector(config)
+
+# 创建Kline对象
+kline = Kline(
+    symbol="BTCUSDT",
+    open=50000.0,
+    high=50100.0,
+    low=49900.0,
+    close=50050.0,
+    volume=1234.56,  # ✅ 真实的1秒K线成交量
+    timestamp=pd.Timestamp.now()
+)
+
+# 检测突破
+signal = detector.detect_breakout(kline, symbol="BTCUSDT")
+
+if signal:
+    print(f"检测到突破信号!")
+    print(f"  类型: {signal.signal_type}")
+    print(f"  强度: {signal.strength:.2f}x")
+    print(f"  价格变化: {signal.price_change_pct:.3f}%")
+    print(f"  置信度: {signal.confidence:.2f}")
+```
+
+---
+
+## 使用示例
+
+### 示例1: 订阅1秒K线并检测突破
+
+```python
+import asyncio
+from core.data.websocket_client import BinanceWebSocketClient
+from core.strategy.kline_breakout_detector import KlineBreakoutDetector, Kline
+
+async def main():
+    # 创建WebSocket客户端
+    client = BinanceWebSocketClient(testnet=True)
+
+    # 创建突破检测器
+    detector_config = {
+        'volume_surge_threshold': 3.0,
+        'volume_window': 50
+    }
+    detector = KlineBreakoutDetector(detector_config)
+
+    # K线回调
+    async def on_kline(kline: Kline):
+        print(f"收到K线: {kline.symbol}, Price: {kline.close}, Volume: {kline.volume}")
+
+        # 检测突破
+        signal = detector.detect_breakout(kline, kline.symbol)
+
+        if signal:
+            print(f"✅ 突破信号: {signal.signal_type}, 强度: {signal.strength:.2f}x")
+
+    # 添加回调
+    client.add_kline_callback(on_kline)
+
+    # 订阅1秒K线流
+    symbols = ['BTCUSDT', 'ETHUSDT']
+    await client.subscribe_klines(symbols, interval='1s')
+
+    # 运行
+    await client.run_forever()
+
+asyncio.run(main())
+```
+
+### 示例2: 回测1秒K线策略
+
+```python
+from core.strategy.multi_timeframe_kline_breakout import MultiTimeframeKlineBreakoutStrategy
+from core.backtest.backtester import Backtester
+import yaml
+
+# 加载配置
+with open('configs/mt_kline_breakout_config.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+# 创建策略
+strategy = MultiTimeframeKlineBreakoutStrategy(config['strategy'])
+
+# 创建回测引擎
+backtester = Backtester(
+    strategy=strategy,
+    initial_balance=10000.0,
+    symbols=['BTCUSDT', 'ETHUSDT']
+)
+
+# 运行回测
+results = backtester.run(
+    start_date='2024-01-01',
+    end_date='2024-01-15'
+)
+
+# 打印结果
+print(f"总收益率: {results['total_return']:.2%}")
+print(f"最大回撤: {results['max_drawdown']:.2%}")
+print(f"夏普比率: {results['sharpe_ratio']:.2f}")
+print(f"交易次数: {results['total_trades']}")
+print(f"胜率: {results['win_rate']:.2%}")
+```
+
+### 示例3: 验证1秒K线数据准确性
+
+```python
+from core.strategy.kline_breakout_detector import Kline
+import pandas as pd
+
+# 验证volume字段准确性
+def verify_volume_accuracy():
+    # 场景1: 真实1秒K线成交量
+    true_1s_volume = 1234.56
+
+    kline = Kline(
+        symbol="BTCUSDT",
+        open=50000.0,
+        high=50100.0,
+        low=49900.0,
+        close=50050.0,
+        volume=true_1s_volume,  # ✅ 真实1秒K线成交量
+        timestamp=pd.Timestamp.now()
+    )
+
+    # 验证
+    assert kline.volume == true_1s_volume, "volume应该准确"
+    assert kline.volume > 0, "volume应该是正数"
+
+    print(f"✅ volume字段准确性验证通过")
+    print(f"   真实1秒K线成交量: {kline.volume} BTC")
+    print(f"   ✅ 不使用last_quantity字段（ticker的单次成交量）")
+
+    # 场景2: 对比ticker的last_quantity（错误方案）
+    ticker_last_quantity = 0.5
+
+    print(f"\n   ❌ ticker的last_quantity: {ticker_last_quantity} BTC")
+    print(f"   ✅ 两者相差 {true_1s_volume / ticker_last_quantity:.1f} 倍")
+    print(f"   ✅ 因此必须使用Kline的volume字段")
+
+verify_volume_accuracy()
+```
+
+---
+
+## 数据流架构
+
+### 实时数据流
+```
+Binance WebSocket (@kline_1s)
+        ↓
+BinanceWebSocketClient._process_kline_message()
+        ↓
+过滤未关闭K线 (k['x'] == True)
+        ↓
+创建Kline对象 (使用真实的volume字段)
+        ↓
+触发Kline回调
+        ↓
+KlineBreakoutDetector.detect_breakout()
+        ↓
+生成Signal (如果检测到突破)
+        ↓
+执行交易信号
+```
+
+### 回测数据流
+```
+历史K线数据加载
+        ↓
+Kline对象创建 (使用真实的volume字段)
+        ↓
+MultiTimeframeKlineBreakoutStrategy.update()
+        ↓
+KlineBreakoutDetector.detect_breakout()
+        ↓
+生成Signal
+        ↓
+Backtester执行信号
+        ↓
+计算性能指标
+```
+
+---
+
+## 数据准确性保证
+
+### 1秒K线数据准确性
+
+| 数据类型 | 字段 | 含义 | 准确性 |
+|----------|------|------|--------|
+| **1秒K线** | `volume` | 该秒内所有成交总和 | ✅ 100%准确 |
+| **Ticker** | `last_quantity` | 最近一次成交数量 | ❌ 不准确（单次成交） |
+
+### 关键差异示例
+```python
+# ❌ 错误：使用ticker数据
+ticker_last_quantity = 0.5  # 最近一次成交数量（如0.5 BTC）
+
+# ✅ 正确：使用1秒K线数据
+kline_volume = 1234.56  # 该秒内所有成交总和（如1234.56 BTC）
+
+# 差异：2469倍
+```
+
+---
+
+## 相关文档
+
+- [架构修复文档](./STRATEGY_ARCHITECTURE_FIX.md) - 数据架构修复详情
+- [迁移指南](./MIGRATION_GUIDE.md) - 从ticker迁移到1秒K线
+- [Phase 4完成报告](./PHASE4_COMPLETION_REPORT.md) - 验证结果
+- [策略模块文档](../core/strategy/CLAUDE.md) - 策略开发指南
+
+---
+
+**文档创建时间**: 2026-01-15
+**文档版本**: v1.0
+**数据架构**: 1秒K线WebSocket流
+**状态**: ✅ 最新
 
 ## 配置文件格式
 

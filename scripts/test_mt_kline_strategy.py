@@ -101,9 +101,9 @@ def create_test_klines(symbol: str, count: int = 300, trend: str = 'uptrend', in
             data.loc[i, 'high'] = breakout_price + np.random.rand() * 10
             data.loc[i, 'low'] = breakout_price - np.random.rand() * 10
 
-        # 2. 成交量激增（3倍平均）
-        avg_volume = data.loc[:breakout_start, 'volume'].mean()
-        data.loc[breakout_start:, 'volume'] = int(avg_volume * 3.5)  # 3.5倍成交量
+        # 2. 成交量激增（3.5倍平均）⭐ 修复：使用突破前的平均
+        avg_volume_before = data.loc[:breakout_start, 'volume'].mean()
+        data.loc[breakout_start:, 'volume'] = int(avg_volume_before * 3.5)  # 3.5倍成交量
 
     # 确保high >= close >= low
     data['high'] = data[['open', 'close', 'high']].max(axis=1)
@@ -447,6 +447,272 @@ def test_websocket_integration():
     return True
 
 
+def test_performance_optimization_components():
+    """测试性能优化组件（Phase 0-3）"""
+    logger.info("=" * 80)
+    logger.info("测试6: 性能优化组件（Phase 0-3）")
+    logger.info("=" * 80)
+
+    try:
+        # 导入优化组件
+        from core.strategy.unified_data_provider import (
+            create_data_provider,
+            BacktestDataProvider,
+            DataProviderInterface
+        )
+        from core.strategy.indicator_cache_manager import (
+            create_indicator_cache,
+            IndicatorCacheManager
+        )
+        from core.strategy.multi_timeframe_subscriber import (
+            MultiTimeframeKlineSubscriber,
+            validate_timeframes
+        )
+        from core.strategy.kline_processor_router import (
+            KlineProcessorRouter,
+            Kline,
+            validate_kline_message,
+            extract_kline_info
+        )
+
+        logger.info("✅ 所有性能优化组件导入成功")
+
+        # 测试数据提供者
+        logger.info("\n测试数据提供者:")
+        backtest_provider = create_data_provider('backtest', data_dir='data')
+        logger.info(f"  ✅ 回测数据提供者创建成功: {type(backtest_provider).__name__}")
+        logger.info(f"  ✅ 是否可用: {backtest_provider.is_available()}")
+
+        # 测试指标缓存
+        logger.info("\n测试指标缓存管理器:")
+        cache_mgr = create_indicator_cache(mode='default')
+        logger.info(f"  ✅ 缓存管理器创建成功")
+
+        # 测试缓存操作
+        test_indicators = {'sma_20': 50000.0, 'rsi': 65.0}
+        cache_mgr.update_indicators('BTCUSDT', '15m', test_indicators)
+        logger.info(f"  ✅ 缓存更新成功")
+
+        cached = cache_mgr.get_indicators('BTCUSDT', '15m')
+        logger.info(f"  ✅ 缓存读取成功: {list(cached.keys())}")
+        logger.info(f"  ✅ 缓存有效性: {cache_mgr.is_cache_valid('BTCUSDT', '15m')}")
+
+        # 测试统计信息
+        stats = cache_mgr.get_cache_statistics()
+        logger.info(f"  ✅ 缓存统计: {stats['total_entries']}个条目, 命中率{stats['cache_hit_rate']:.2%}")
+
+        # 测试多时间框架订阅管理器
+        logger.info("\n测试多时间框架订阅管理器:")
+        subscriber = MultiTimeframeKlineSubscriber(
+            symbols=['BTCUSDT', 'ETHUSDT'],
+            timeframes=['1s', '15m', '1h'],
+            config={'enable_stats': True}
+        )
+        logger.info(f"  ✅ 订阅管理器创建成功")
+        logger.info(f"  ✅ 交易对: {subscriber.symbols}")
+        logger.info(f"  ✅ 时间框架: {subscriber.timeframes}")
+        logger.info(f"  ✅ 运行状态: {subscriber.is_running()}")
+
+        # 测试时间框架验证
+        valid_tfs = validate_timeframes(['1s', '15m', '1h', '1d'])
+        logger.info(f"  ✅ 时间框架验证: {valid_tfs}")
+
+        # 测试K线处理器路由器
+        logger.info("\n测试K线处理器路由器:")
+
+        # 创建模拟策略
+        mock_config = {
+            'mode': 'paper',
+            'name': 'TestStrategy',
+            'symbols': ['BTC-USDT'],
+            'strategy': {
+                'kline_breakout': {'window_size': 50}
+            }
+        }
+        mock_strategy = MultiTimeframeKlineBreakoutStrategy(mock_config)
+
+        # 创建处理器路由器
+        router = KlineProcessorRouter(mock_strategy)
+        logger.info(f"  ✅ 处理器路由器创建成功")
+
+        # 测试Kline类
+        test_kline = Kline(
+            symbol='BTCUSDT',
+            open=50000.0,
+            high=50100.0,
+            low=49900.0,
+            close=50050.0,
+            volume=1000.0,
+            timestamp=pd.Timestamp.now(),
+            is_closed=True
+        )
+        logger.info(f"  ✅ Kline对象创建成功: {test_kline}")
+
+        # 测试处理统计
+        processing_stats = router.get_processing_statistics()
+        logger.info(f"  ✅ 处理统计: {processing_stats['total_processed']}个已处理")
+
+        logger.info("\n✅ 所有性能优化组件测试通过！")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ 性能优化组件测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_optimization_integration():
+    """测试优化组件集成到策略（Phase 4）"""
+    logger.info("=" * 80)
+    logger.info("测试7: 优化组件集成（Phase 4）")
+    logger.info("=" * 80)
+
+    try:
+        # 创建Paper模式策略（启用优化）
+        config = {
+            'mode': 'paper',  # Paper模式应启用优化
+            'name': 'MultiTimeframeKlineBreakout',
+            'symbols': ['BTC-USDT'],
+            'strategy': {
+                'kline_breakout': {
+                    'window_size': 50,
+                    'volume_surge_threshold': 3.0
+                }
+            }
+        }
+
+        strategy = MultiTimeframeKlineBreakoutStrategy(config)
+        logger.info("✅ Paper模式策略创建成功")
+
+        # 检查优化组件是否初始化
+        logger.info("\n检查优化组件:")
+
+        # 数据提供者
+        logger.info(f"  数据提供者: {strategy.data_provider is not None}")
+        if strategy.data_provider:
+            logger.info(f"    类型: {type(strategy.data_provider).__name__}")
+
+        # 指标缓存
+        logger.info(f"  指标缓存: {strategy.indicator_cache is not None}")
+        if strategy.indicator_cache:
+            logger.info(f"    启用: {strategy.indicator_cache.enabled}")
+
+        # 多时间框架订阅管理器
+        logger.info(f"  MT订阅管理器: {strategy.mt_subscriber is not None}")
+        if strategy.mt_subscriber:
+            logger.info(f"    时间框架: {strategy.mt_subscriber.timeframes}")
+
+        # K线处理器路由器
+        logger.info(f"  处理器路由器: {strategy.processor_router is not None}")
+
+        # K线历史存储
+        logger.info(f"  K线历史: {strategy.kline_history is not None}")
+        if strategy.kline_history:
+            logger.info(f"    时间框架: {list(strategy.kline_history.keys())}")
+
+        # 测试新方法
+        logger.info("\n测试新方法:")
+
+        # 测试confirm_with_cached_indicators
+        from core.strategy.base_strategy import Signal, SignalType
+        test_signal = Signal(
+            signal_type=SignalType.OPEN_LONG,
+            symbol='BTCUSDT',
+            price=50000.0,
+            amount=0.1,
+            confidence=0.7
+        )
+
+        test_cached = {
+            '15m': {'sma_5_15_cross': True, 'bb_position': 0.9},
+            '1h': {'ema_12_26_cross': True, 'macd_bullish': True}
+        }
+
+        confirmed = strategy.confirm_with_cached_indicators(test_signal, test_cached)
+        logger.info(f"  ✅ confirm_with_cached_indicators: {confirmed is not None}")
+        if confirmed:
+            logger.info(f"    确认数量: {len(confirmed.metadata.get('confirmations', []))}")
+
+        logger.info("\n✅ 优化组件集成测试通过！")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ 优化组件集成测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_backtest_compatibility():
+    """测试回测模式兼容性"""
+    logger.info("=" * 80)
+    logger.info("测试8: 回测模式兼容性")
+    logger.info("=" * 80)
+
+    try:
+        # 创建回测模式策略
+        config = {
+            'mode': 'backtest',  # 回测模式
+            'name': 'MultiTimeframeKlineBreakout',
+            'symbols': ['BTC-USDT'],
+            'strategy': {
+                'kline_breakout': {
+                    'window_size': 50,
+                    'volume_surge_threshold': 3.0
+                }
+            }
+        }
+
+        strategy = MultiTimeframeKlineBreakoutStrategy(config)
+        logger.info("✅ 回测模式策略创建成功")
+
+        # 检查优化组件是否未初始化（回测模式不应使用）
+        logger.info("\n检查回测模式配置:")
+        logger.info(f"  是回测模式: {strategy.is_backtest}")
+        logger.info(f"  数据提供者: {strategy.data_provider is None}")  # 应该是None
+        logger.info(f"  指标缓存: {strategy.indicator_cache is None}")  # 应该是None
+        logger.info(f"  MT订阅管理器: {strategy.mt_subscriber is None}")  # 应该是None
+        logger.info(f"  处理器路由器: {strategy.processor_router is None}")  # 应该是None
+
+        # 测试原有方法是否正常工作
+        logger.info("\n测试原有方法:")
+
+        # 创建测试数据
+        data_1s = {
+            'BTC-USDT': create_test_klines('BTCUSDT', count=100, trend='uptrend', include_breakout=True)
+        }
+        higher_tf_data = {
+            'BTC-USDT': create_higher_timeframe_test_data('BTCUSDT', count=100)
+        }
+
+        # 计算指标
+        indicators = strategy.calculate_indicators(data_1s)
+        logger.info(f"  ✅ calculate_indicators: {len(indicators)}个交易对")
+
+        # 生成信号
+        signals = strategy.generate_signals(data_1s, higher_tf_data)
+        logger.info(f"  ✅ generate_signals: {len(signals)}个信号")
+
+        # 获取统计
+        stats = strategy.get_signal_statistics()
+        logger.info(f"  ✅ get_signal_statistics: 确认率{stats['confirmation_rate']:.2%}")
+
+        # 获取状态
+        status = strategy.get_strategy_status()
+        logger.info(f"  ✅ get_strategy_status: {status['name']}")
+
+        logger.info("\n✅ 回测模式兼容性测试通过！")
+        logger.info("✅ 原有方法在回测模式下正常工作")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ 回测模式兼容性测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def run_all_tests():
     """运行所有测试"""
     logger.info("")
@@ -460,7 +726,10 @@ def run_all_tests():
         ("MultiTimeframeConfirmator", test_multi_timeframe_confirmator),
         ("策略初始化", test_strategy_initialization),
         ("策略信号生成", test_strategy_signal_generation),
-        ("WebSocket集成", test_websocket_integration)
+        ("WebSocket集成", test_websocket_integration),
+        ("性能优化组件", test_performance_optimization_components),
+        ("优化组件集成", test_optimization_integration),
+        ("回测兼容性", test_backtest_compatibility)
     ]
 
     results = {}

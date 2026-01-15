@@ -96,6 +96,61 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             'total_klines_processed': 0  # 处理的K线总数
         }
 
+        # ==================== 性能优化组件（Phase 0-3） ====================
+        mode = config.get('mode', 'paper')
+
+        if not self.is_backtest:
+            # 实时模式：使用多时间框架订阅和缓存
+            from core.strategy.unified_data_provider import create_data_provider
+            from core.strategy.indicator_cache_manager import create_indicator_cache
+            from core.strategy.multi_timeframe_subscriber import MultiTimeframeKlineSubscriber
+            from core.strategy.kline_processor_router import KlineProcessorRouter
+
+            # 统一数据提供者
+            self.data_provider = create_data_provider(
+                mode=mode,
+                symbols=self.binance_symbols,
+                timeframes=['1s', '15m', '1h']
+            )
+
+            # 指标缓存管理器
+            self.indicator_cache = create_indicator_cache(mode='default')
+
+            # 多时间框架订阅管理器
+            self.mt_subscriber = MultiTimeframeKlineSubscriber(
+                symbols=self.binance_symbols,
+                timeframes=['1s', '15m', '1h'],
+                config={
+                    'max_reconnect_attempts': 5,
+                    'reconnect_delay_ms': 1000,
+                    'enable_stats': True
+                }
+            )
+
+            # K线处理器路由器
+            self.processor_router = KlineProcessorRouter(self)
+
+            # K线历史存储（按时间框架）
+            self.kline_history = {
+                '1s': {},   # {symbol: deque} - 继续使用现有的kline_1s_buffer
+                '15m': {},  # {symbol: deque}
+                '1h': {}    # {symbol: deque}
+            }
+
+            logger.info(f"[{self.name}] ✅ 性能优化组件初始化完成")
+            logger.info(f"[{self.name}] - 多时间框架订阅: 1s, 15m, 1h")
+            logger.info(f"[{self.name}] - 指标缓存: 启用")
+            logger.info(f"[{self.name}] - 处理器路由器: 已配置")
+        else:
+            # 回测模式：不使用优化组件，保持原有逻辑
+            self.data_provider = None
+            self.indicator_cache = None
+            self.mt_subscriber = None
+            self.processor_router = None
+            self.kline_history = None
+
+            logger.info(f"[{self.name}] 回测模式：跳过性能优化组件")
+
         logger.info(f"[{self.name}] 策略初始化完成")
         logger.info(f"[{self.name}] 交易对: {self.binance_symbols}")
         logger.info(f"[{self.name}] 模式: {'回测' if self.is_backtest else '实盘'}")
@@ -213,41 +268,43 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 continue
 
             try:
-                # 获取最新1秒K线
-                latest_kline = self._df_row_to_kline(df.iloc[-1], binance_symbol)
+                # ⭐ 关键修复：逐K线处理，模拟实时流
+                # 只返回最后检测到的信号（或所有信号）
+                for idx, row in df.iterrows():
+                    kline = self._df_row_to_kline(row, binance_symbol)
 
-                # 准备更高时间框架数据
-                symbol_higher_tf_data = higher_timeframe_data.get(symbol, {}) if higher_timeframe_data else {}
+                    # 准备更高时间框架数据
+                    symbol_higher_tf_data = higher_timeframe_data.get(symbol, {}) if higher_timeframe_data else {}
 
-                # === Layer 1: 1秒K线量价突破检测 ===
-                preliminary_signal = self.kline_detector.detect_breakout(
-                    latest_kline,
-                    binance_symbol,
-                    symbol_higher_tf_data  # 传递15m/1h数据用于布林带和支撑阻力检测
-                )
+                    # === Layer 1: 1秒K线量价突破检测 ===
+                    preliminary_signal = self.kline_detector.detect_breakout(
+                        kline,
+                        binance_symbol,
+                        symbol_higher_tf_data  # 传递15m/1h数据用于布林带和支撑阻力检测
+                    )
 
-                if preliminary_signal:
-                    self.signal_stats['preliminary_signals'] += 1
+                    if preliminary_signal:
+                        self.signal_stats['preliminary_signals'] += 1
 
-                    logger.info(f"[{symbol}] ⚡ 初步量价突破信号: {preliminary_signal.signal_type.value}, "
-                               f"强度: {preliminary_signal.confidence:.2f}, "
-                               f"价格: {latest_kline.close:.6f}")
+                        logger.info(f"[{symbol}] ⚡ 初步量价突破信号: {preliminary_signal.signal_type.value}, "
+                                   f"强度: {preliminary_signal.confidence:.2f}, "
+                                   f"价格: {kline.close:.6f}")
 
-                    # === Layer 2: 多时间框架技术指标确认（可选） ===
-                    # 由于Layer 1已经使用了更高时间框架的布林带和支撑阻力，
-                    # 这里的确认可以简化或省略
-                    confirmed_signal = self._confirm_with_indicators(preliminary_signal, symbol, binance_symbol)
+                        # === Layer 2: 多时间框架技术指标确认（可选） ===
+                        # 由于Layer 1已经使用了更高时间框架的布林带和支撑阻力，
+                        # 这里的确认可以简化或省略
+                        confirmed_signal = self._confirm_with_indicators(preliminary_signal, symbol, binance_symbol)
 
-                    if confirmed_signal:
-                        self.signal_stats['confirmed_signals'] += 1
+                        if confirmed_signal:
+                            self.signal_stats['confirmed_signals'] += 1
 
-                        logger.info(f"[{symbol}] ✅ 最终交易信号: {confirmed_signal.signal_type.value}, "
-                                   f"置信度: {confirmed_signal.confidence:.2f}, "
-                                   f"原因: {confirmed_signal.reason}")
+                            logger.info(f"[{symbol}] ✅ 最终交易信号: {confirmed_signal.signal_type.value}, "
+                                       f"置信度: {confirmed_signal.confidence:.2f}, "
+                                       f"原因: {confirmed_signal.metadata.get('reason', 'N/A')}")
 
-                        signals.append(confirmed_signal)
-                    else:
-                        logger.info(f"[{symbol}] ❌ 未通过技术指标确认")
+                            signals.append(confirmed_signal)
+                        else:
+                            logger.info(f"[{symbol}] ❌ 未通过技术指标确认")
 
             except Exception as e:
                 logger.error(f"[{symbol}] 处理K线数据时出错: {e}")
@@ -261,7 +318,9 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
     async def start_1s_kline_subscription(self, api_key: str = None, api_secret: str = None):
         """
-        启动1秒K线WebSocket订阅
+        启动多时间框架K线WebSocket订阅（优化版本）
+
+        现在订阅：1s、15m、1h三个时间框架
 
         Args:
             api_key: Binance API密钥（公开数据不需要）
@@ -271,31 +330,74 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             logger.warning(f"[{self.name}] WebSocket已在运行中")
             return
 
-        try:
-            from binance import BinanceSocketManager
+        # 检查是否使用优化组件
+        if self.mt_subscriber and self.processor_router:
+            # 使用新的多时间框架订阅管理器
+            try:
+                # 保存API密钥供重连使用
+                self._api_key = api_key
+                self._api_secret = api_secret
 
-            # 创建BinanceSocketManager（不需要API密钥即可获取公开K线数据）
-            self.bsm = BinanceSocketManager(api_key, api_secret)
+                # ==================== 注册处理器 ====================
+                # 1s K线处理器（快速检测）
+                self.mt_subscriber.register_handler(
+                    '1s',
+                    self.processor_router.process_1s_kline
+                )
 
-            # 构建订阅流
-            streams = [f"{s.lower()}@kline_1s" for s in self.binance_symbols]
+                # 15m K线处理器（指标更新）
+                self.mt_subscriber.register_handler(
+                    '15m',
+                    lambda msg: self.processor_router.process_higher_tf_kline(msg, '15m')
+                )
 
-            logger.info(f"[{self.name}] 启动WebSocket订阅，流: {streams}")
+                # 1h K线处理器（指标更新）
+                self.mt_subscriber.register_handler(
+                    '1h',
+                    lambda msg: self.processor_router.process_higher_tf_kline(msg, '1h')
+                )
 
-            # 多路复用订阅
-            self.kline_socket = self.bsm.multiplex_socket(streams)
-            await self.kline_socket.__aenter__()
+                # ==================== 启动所有订阅 ====================
+                await self.mt_subscriber.start_all_subscriptions(api_key, api_secret)
+                self.ws_running = True
 
-            self.ws_running = True
+                logger.info(f"[{self.name}] ✅ 多时间框架WebSocket订阅启动成功")
+                logger.info(f"[{self.name}] 订阅时间框架: 1s, 15m, 1h")
 
-            # 启动K线处理任务
-            self.ws_task = asyncio.create_task(self._process_kline_stream())
+            except Exception as e:
+                logger.error(f"[{self.name}] 启动WebSocket订阅失败: {e}")
+                raise
+        else:
+            # 使用原有的1s订阅方式（回测模式或未启用优化）
+            try:
+                from binance import BinanceSocketManager
 
-            logger.info(f"[{self.name}] ✅ WebSocket订阅启动成功")
+                # 保存API密钥供重连使用
+                self._api_key = api_key
+                self._api_secret = api_secret
 
-        except Exception as e:
-            logger.error(f"[{self.name}] 启动WebSocket订阅失败: {e}")
-            raise
+                # 创建BinanceSocketManager（不需要API密钥即可获取公开K线数据）
+                self.bsm = BinanceSocketManager(api_key, api_secret)
+
+                # 构建订阅流（仅1s）
+                streams = [f"{s.lower()}@kline_1s" for s in self.binance_symbols]
+
+                logger.info(f"[{self.name}] 启动WebSocket订阅（1s仅），流: {streams}")
+
+                # 多路复用订阅
+                self.kline_socket = self.bsm.multiplex_socket(streams)
+                await self.kline_socket.__aenter__()
+
+                self.ws_running = True
+
+                # 启动K线处理任务
+                self.ws_task = asyncio.create_task(self._process_kline_stream())
+
+                logger.info(f"[{self.name}] ✅ WebSocket订阅启动成功（1s仅）")
+
+            except Exception as e:
+                logger.error(f"[{self.name}] 启动WebSocket订阅失败: {e}")
+                raise
 
     async def stop_1s_kline_subscription(self):
         """停止1秒K线WebSocket订阅"""
@@ -326,24 +428,116 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         except Exception as e:
             logger.error(f"[{self.name}] 停止WebSocket订阅时出错: {e}")
 
+    async def _restart_kline_subscription(self):
+        """
+        重启1秒K线WebSocket订阅（用于重连）
+
+        注意：此方法假设已经初始化过bsm和api_key/api_secret
+        """
+        try:
+            # 关闭旧的连接
+            if self.kline_socket:
+                try:
+                    await self.kline_socket.__aexit__(None, None, None)
+                except Exception as e:
+                    logger.debug(f"[{self.name}] 关闭旧socket时出错（可忽略）: {e}")
+
+            if self.bsm:
+                try:
+                    await self.bsm.close()
+                except Exception as e:
+                    logger.debug(f"[{self.name}] 关闭旧BSM时出错（可忽略）: {e}")
+
+            # 创建新的连接
+            from binance import BinanceSocketManager
+
+            # 获取API密钥（从配置或使用None表示公开数据）
+            api_key = getattr(self, '_api_key', None)
+            api_secret = getattr(self, '_api_secret', None)
+
+            # 创建新的BinanceSocketManager
+            self.bsm = BinanceSocketManager(api_key, api_secret)
+
+            # 构建订阅流
+            streams = [f"{s.lower()}@kline_1s" for s in self.binance_symbols]
+
+            logger.info(f"[{self.name}] 重新建立WebSocket订阅，流: {streams}")
+
+            # 多路复用订阅
+            self.kline_socket = self.bsm.multiplex_socket(streams)
+            await self.kline_socket.__aenter__()
+
+            logger.info(f"[{self.name}] ✅ WebSocket重连成功，准备接收数据")
+
+        except Exception as e:
+            logger.error(f"[{self.name}] 重连WebSocket失败: {e}")
+            raise
+
     async def _process_kline_stream(self):
-        """处理1秒K线数据流"""
+        """处理1秒K线数据流（带自动重连机制）"""
         logger.info(f"[{self.name}] 开始处理K线数据流")
 
-        try:
-            async for msg in self.kline_socket:
+        retry_count = 0
+        max_retries = 10  # 最大重试次数
+        base_wait_time = 2  # 基础等待时间（秒）
+
+        while retry_count < max_retries and self.ws_running:
+            try:
+                async for msg in self.kline_socket:
+                    if not self.ws_running:
+                        logger.info(f"[{self.name}] 收到停止信号，退出K线处理")
+                        break
+
+                    try:
+                        # 处理K线消息
+                        await self._process_1s_kline(msg)
+                        # 成功处理消息，重置重试计数
+                        retry_count = 0
+                    except Exception as msg_error:
+                        logger.warning(f"[{self.name}] 处理单条K线消息时出错: {msg_error}")
+                        # 单条消息错误不中断整个流，继续处理下一条
+
+                # 正常退出循环
                 if not self.ws_running:
                     break
 
-                # 处理K线消息
-                await self._process_1s_kline(msg)
+            except asyncio.CancelledError:
+                logger.info(f"[{self.name}] K线处理任务被取消")
+                break
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"[{self.name}] WebSocket连接出错 (重试 {retry_count}/{max_retries}): {e}")
 
-        except asyncio.CancelledError:
-            logger.info(f"[{self.name}] K线处理任务被取消")
-        except Exception as e:
-            logger.error(f"[{self.name}] 处理K线流时出错: {e}")
-        finally:
-            logger.info(f"[{self.name}] K线数据流处理结束")
+                if retry_count >= max_retries:
+                    logger.error(f"[{self.name}] 达到最大重试次数({max_retries})，停止重连")
+                    break
+
+                # 指数退避：2^retry_count 秒，最大60秒
+                wait_time = min(base_wait_time ** retry_count, 60)
+                logger.info(f"[{self.name}] 等待 {wait_time} 秒后重连...")
+
+                # 等待指定时间
+                for _ in range(int(wait_time * 10)):  # 0.1秒检查一次
+                    if not self.ws_running:
+                        logger.info(f"[{self.name}] 收到停止信号，取消重连")
+                        break
+                    await asyncio.sleep(0.1)
+
+                if not self.ws_running:
+                    break
+
+                # 尝试重新连接
+                logger.info(f"[{self.name}] 尝试重新连接 WebSocket...")
+                try:
+                    await self._restart_kline_subscription()
+                    logger.info(f"[{self.name}] ✅ WebSocket重连成功")
+                    # 重连成功，创建新的kline_socket后继续循环
+                    continue
+                except Exception as reconnect_error:
+                    logger.error(f"[{self.name}] WebSocket重连失败: {reconnect_error}")
+                    # 继续下一次重试
+
+        logger.info(f"[{self.name}] K线数据流处理结束")
 
     async def _process_1s_kline(self, msg: Dict):
         """
@@ -438,80 +632,44 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         """
         使用技术指标确认初步信号（同步版本，用于回测）
 
+        注意：由于Layer 1（KlineBreakoutDetector）已经使用了15m/1h的布林带和支撑阻力
+        进行量价结合的确认，这里直接返回初步信号，避免重复确认和架构矛盾。
+
         Args:
             preliminary: 初步突破信号
             symbol: 原始交易对符号
             binance_symbol: Binance格式交易对符号
 
         Returns:
-            确认后的最终信号，如果未通过确认则返回None
+            确认后的最终信号（直接返回初步信号）
         """
-        # 从indicators中获取已计算的指标
-        if symbol not in self.indicators:
-            logger.debug(f"[{symbol}] 没有技术指标数据，跳过确认")
-            return None
+        # Layer 1已经做了充分的量价结合确认：
+        # - 成交量激增检测（1s vs 历史）
+        # - 布林带突破检测（1s价格 vs 15m/1h BB）
+        # - 支撑阻力突破检测（1s价格 vs 15m/1h SR）
+        #
+        # 所以这里直接返回初步信号，不需要额外的技术指标确认
+        # 这避免了使用1s K线指标进行确认的架构矛盾
 
-        symbol_indicators = self.indicators[symbol]
-        confirmations = []
+        logger.debug(f"[{symbol}] 跳过技术指标确认，Layer 1已充分确认")
 
-        # === 15分钟级别确认 ===
+        # 直接返回初步信号，保留原有的元数据
+        # 获取原始原因
+        original_reason = preliminary.metadata.get('reason', "1s K线量价突破")
 
-        # 1. SMA交叉确认
-        if symbol_indicators.get('sma_5_15_cross', False):
-            confirmations.append({
-                'timeframe': '15m',
-                'indicator': 'SMA_5_15',
-                'value': symbol_indicators.get('sma_5', 0)
-            })
-
-        # 2. 布林带位置确认（价格在上轨附近）
-        bb_position = symbol_indicators.get('bb_position', 0.5)
-        if bb_position > 0.7:  # 价格在布林带上半部分
-            confirmations.append({
-                'timeframe': '15m',
-                'indicator': 'BOLLINGER',
-                'value': bb_position
-            })
-
-        # 3. RSI确认（避免超买超卖）
-        rsi = symbol_indicators.get('rsi', 50)
-        if 30 < rsi < 70:  # RSI在合理区间
-            confirmations.append({
-                'timeframe': '15m',
-                'indicator': 'RSI',
-                'value': rsi
-            })
-
-        # 4. 价格动量确认
-        return_5 = symbol_indicators.get('return_5', 0)
-        if return_5 > 0.005:  # 5期收益率 > 0.5%
-            confirmations.append({
-                'timeframe': '15m',
-                'indicator': 'MOMENTUM',
-                'value': return_5
-            })
-
-        # === 确认规则 ===
-        # 至少需要2个技术指标确认
-        min_confirmations = 2
-
-        if len(confirmations) >= min_confirmations:
-            # 通过确认，创建最终信号
-            return Signal(
-                signal_type=preliminary.signal_type,
-                symbol=preliminary.symbol,
-                price=preliminary.price,
-                amount=preliminary.amount,
-                confidence=min(1.0, preliminary.confidence + 0.1),  # 提高置信度
-                metadata={
-                    'preliminary_signal': preliminary.to_dict(),
-                    'confirmations': confirmations,
-                    'reason': f"1s突破 + {len(confirmations)}个技术指标确认",
-                    'strategy': self.name
-                }
-            )
-
-        return None
+        return Signal(
+            signal_type=preliminary.signal_type,
+            symbol=preliminary.symbol,
+            price=preliminary.price,
+            amount=preliminary.amount,
+            confidence=min(1.0, preliminary.confidence),  # 保持原置信度
+            metadata={
+                **preliminary.metadata,  # 保留Layer 1的详细元数据
+                'strategy': self.name,
+                'confirmation_method': 'layer1_only',  # 标记只使用了Layer 1确认
+                'reason': f"{original_reason}（Layer 1已确认）"  # 在metadata中添加原因说明
+            }
+        )
 
     async def _confirm_with_buffered_data(self, preliminary: Signal, symbol: str) -> Optional[Signal]:
         """
@@ -638,3 +796,247 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 for symbol in self.binance_symbols
             }
         }
+
+    # =========================================================================
+    # 性能优化方法（Phase 4新增）
+    # =========================================================================
+
+    async def detect_breakout_fast(
+        self,
+        kline: Kline,
+        symbol: str
+    ) -> Optional[Signal]:
+        """
+        快速突破检测（1s K线路径）
+
+        不计算指标，只读取缓存的指标值，实现快速检测。
+
+        Args:
+            kline: K线对象
+            symbol: 交易对符号
+
+        Returns:
+            Signal对象，如果没有检测到突破返回None
+        """
+        try:
+            # 更新1s K线历史（继续使用现有的kline_1s_buffer）
+            if symbol not in self.kline_1s_buffer:
+                self.kline_1s_buffer[symbol] = deque(maxlen=self.kline_detector.window_size)
+            self.kline_1s_buffer[symbol].append(kline)
+
+            # 获取缓存的更高时间框架数据（15m/1h）
+            if self.indicator_cache:
+                cached_indicators = await self.indicator_cache.get_cached_indicators_safe(
+                    symbol, ['15m', '1h']
+                )
+            else:
+                cached_indicators = {}
+
+            # 使用KlineBreakoutDetector检测（传入缓存的指标数据）
+            signal = self.kline_detector.detect_breakout(
+                kline, symbol, cached_indicators
+            )
+
+            if signal:
+                self.signal_stats['preliminary_signals'] += 1
+                logger.info(
+                    f"[{symbol}] ⚡ 快速检测突破信号: {signal.signal_type.value}, "
+                    f"强度: {signal.confidence:.2f}"
+                )
+
+            return signal
+
+        except Exception as e:
+            logger.error(f"[{symbol}] 快速检测失败: {e}")
+            return None
+
+    async def calculate_timeframe_indicators(
+        self,
+        symbol: str,
+        timeframe: str
+    ) -> Dict[str, Any]:
+        """
+        计算特定时间框架的技术指标
+
+        Args:
+            symbol: 交易对符号
+            timeframe: 时间框架 ('15m' 或 '1h')
+
+        Returns:
+            {indicator_name: value}
+        """
+        try:
+            # 获取该时间框架的K线历史
+            if not self.kline_history or timeframe not in self.kline_history:
+                logger.warning(f"[{symbol}/{timeframe}] K线历史未初始化")
+                return {}
+
+            history = self.kline_history[timeframe].get(symbol)
+            if not history or len(history) < 50:
+                logger.warning(f"[{symbol}/{timeframe}] K线数据不足: {len(history) if history else 0}")
+                return {}
+
+            # 转换为DataFrame
+            df = self._deque_to_dataframe(history)
+
+            # 计算技术指标
+            indicators = {}
+
+            try:
+                if timeframe == '15m':
+                    # 15分钟指标
+                    if len(df) >= 5:
+                        sma5 = df['close'].rolling(window=5).mean()
+                        sma15 = df['close'].rolling(window=15).mean()
+                        indicators['sma_5_15_cross'] = sma5.iloc[-1] > sma15.iloc[-1]
+
+                    # 布林带
+                    if len(df) >= 20:
+                        bb_middle = df['close'].rolling(window=20).mean()
+                        bb_std = df['close'].rolling(window=20).std()
+                        bb_upper = bb_middle + 2 * bb_std
+                        bb_lower = bb_middle - 2 * bb_std
+                        indicators['bb_upper'] = bb_upper.iloc[-1]
+                        indicators['bb_lower'] = bb_lower.iloc[-1]
+
+                        price = df['close'].iloc[-1]
+                        indicators['bb_position'] = (
+                            (price - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])
+                            if (bb_upper.iloc[-1] - bb_lower.iloc[-1]) > 0 else 0.5
+                        )
+
+                elif timeframe == '1h':
+                    # 1小时指标
+                    if len(df) >= 12:
+                        ema12 = df['close'].ewm(span=12).mean()
+                        ema26 = df['close'].ewm(span=26).mean()
+                        indicators['ema_12_26_cross'] = ema12.iloc[-1] > ema26.iloc[-1]
+
+                    # MACD
+                    if len(df) >= 26:
+                        ema12 = df['close'].ewm(span=12).mean()
+                        ema26 = df['close'].ewm(span=26).mean()
+                        macd = ema12 - ema26
+                        signal = macd.ewm(span=9).mean()
+                        indicators['macd_bullish'] = (macd.iloc[-1] - signal.iloc[-1]) > 0
+
+                logger.debug(
+                    f"[{symbol}/{timeframe}] 计算指标完成: {list(indicators.keys())}"
+                )
+
+            except Exception as e:
+                logger.error(f"[{symbol}/{timeframe}] 计算指标时出错: {e}")
+                return {}
+
+            return indicators
+
+        except Exception as e:
+            logger.error(f"[{symbol}/{timeframe}] 指标计算失败: {e}")
+            return {}
+
+    async def update_kline_history(self, kline: Kline, timeframe: str):
+        """
+        更新指定时间框架的K线历史
+
+        Args:
+            kline: K线对象
+            timeframe: 时间框架
+        """
+        symbol = kline.symbol
+
+        if symbol not in self.kline_history[timeframe]:
+            self.kline_history[timeframe][symbol] = deque(maxlen=200)
+
+        self.kline_history[timeframe][symbol].append(kline)
+        logger.debug(f"[{timeframe}] 更新{symbol}K线历史，当前数量: {len(self.kline_history[timeframe][symbol])}")
+
+    def confirm_with_cached_indicators(
+        self,
+        preliminary: Signal,
+        cached_indicators: Dict[str, Dict]
+    ) -> Optional[Signal]:
+        """
+        使用缓存的指标确认信号
+
+        Args:
+            preliminary: 初步突破信号
+            cached_indicators: {'15m': {...}, '1h': {...}}
+
+        Returns:
+            确认后的最终信号，如果未通过确认则返回None
+        """
+        confirmations = []
+
+        # 检查15m指标
+        if '15m' in cached_indicators:
+            tf_15m = cached_indicators['15m']
+            if tf_15m.get('sma_5_15_cross', False):
+                confirmations.append({
+                    'timeframe': '15m',
+                    'indicator': 'SMA_5_15',
+                    'value': tf_15m.get('sma_5_15_cross')
+                })
+            if tf_15m.get('bb_position', 0) > 0.8:
+                confirmations.append({
+                    'timeframe': '15m',
+                    'indicator': 'BOLLINGER',
+                    'value': tf_15m.get('bb_position')
+                })
+
+        # 检查1h指标
+        if '1h' in cached_indicators:
+            tf_1h = cached_indicators['1h']
+            if tf_1h.get('ema_12_26_cross', False):
+                confirmations.append({
+                    'timeframe': '1h',
+                    'indicator': 'EMA_12_26',
+                    'value': tf_1h.get('ema_12_26_cross')
+                })
+            if tf_1h.get('macd_bullish', False):
+                confirmations.append({
+                    'timeframe': '1h',
+                    'indicator': 'MACD',
+                    'value': tf_1h.get('macd_bullish')
+                })
+
+        # 确认规则：至少2个指标
+        if len(confirmations) >= 2:
+            return Signal(
+                signal_type=preliminary.signal_type,
+                symbol=preliminary.symbol,
+                price=preliminary.price,
+                amount=preliminary.amount,
+                confidence=min(1.0, preliminary.confidence + 0.1),
+                metadata={
+                    'preliminary': preliminary.to_dict(),
+                    'confirmations': confirmations,
+                    'cache_hit': True,
+                    'reason': f"1s突破 + {len(confirmations)}个缓存指标确认"
+                }
+            )
+
+        return None
+
+    def _deque_to_dataframe(self, klines: deque) -> pd.DataFrame:
+        """
+        将K线 deque转换为DataFrame
+
+        Args:
+            klines: K线对象队列
+
+        Returns:
+            DataFrame with OHLCV data
+        """
+        data = {
+            'open': [k.open for k in klines],
+            'high': [k.high for k in klines],
+            'low': [k.low for k in klines],
+            'close': [k.close for k in klines],
+            'volume': [k.volume for k in klines],
+            'timestamp': [k.timestamp for k in klines]
+        }
+
+        df = pd.DataFrame(data)
+        df.set_index('timestamp', inplace=True)
+
+        return df

@@ -27,6 +27,10 @@ from dataclasses import dataclass
 from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
+# ✅ K线数据导入
+import pandas as pd
+from core.strategy.kline_breakout_detector import Kline
+
 # 设置日志
 logger = logging.getLogger(__name__)
 
@@ -164,6 +168,7 @@ class BinanceWebSocketClient:
         self.connection_start_time = None
         self.ticker_callbacks: List[Callable] = []
         self.error_callbacks: List[Callable] = []
+        self.kline_callbacks: List[Callable] = []  # ✅ 新增：K线数据回调
         self.ticker_cache: Dict[str, TickerData] = {}
 
         # 统计信息
@@ -174,6 +179,10 @@ class BinanceWebSocketClient:
     def add_ticker_callback(self, callback: Callable):
         """添加Ticker数据回调函数"""
         self.ticker_callbacks.append(callback)
+
+    def add_kline_callback(self, callback: Callable):
+        """✅ 添加1秒K线数据回调函数"""
+        self.kline_callbacks.append(callback)
 
     def add_error_callback(self, callback: Callable):
         """添加错误回调函数"""
@@ -193,6 +202,20 @@ class BinanceWebSocketClient:
         # Tick数据管理器异步处理
         if TICK_MANAGER:
             asyncio.create_task(TICK_MANAGER.collect_tick(ticker))
+
+    async def _call_kline_callbacks(self, kline):
+        """✅ 调用1秒K线回调函数"""
+        logger.debug(f"调用K线回调: {kline.symbol}, 回调数量: {len(self.kline_callbacks)}")
+        for i, callback in enumerate(self.kline_callbacks):
+            try:
+                logger.debug(f"执行K线回调 #{i}: {callback.__name__ if hasattr(callback, '__name__') else 'unknown'}")
+                if asyncio.iscoroutinefunction(callback):
+                    await callback(kline)
+                else:
+                    callback(kline)
+                logger.debug(f"K线回调 #{i} 执行成功")
+            except Exception as e:
+                logger.error(f"K线回调 #{i} 失败: {e}")
 
     def _call_error_callbacks(self, error: Exception):
         """调用错误回调函数"""
@@ -322,16 +345,16 @@ class BinanceWebSocketClient:
                 self._ts = self._bm.miniticker_socket()
                 logger.info("使用 mini ticker socket（数据字段受限）")
             else:
-                # 构建流列表：每个 symbol 对应一个 ticker 流
-                # 格式: <symbol>@ticker  (如: btcusdt@ticker)
-                streams = [f"{symbol.lower()}@ticker" for symbol in self.subscribed_symbols]
+                # ✅ 修复：构建流列表：每个 symbol 对应一个 1秒K线 流
+                # 格式: <symbol>@kline_1s  (如: btcusdt@kline_1s)
+                streams = [f"{symbol.lower()}@kline_1s" for symbol in self.subscribed_symbols]
 
                 # 🔥 改进日志输出
                 if self.subscribe_whitelist:
-                    logger.info(f"✅ 订阅白名单模式: {len(streams)} 个 {self.quote_asset} 交易对")
+                    logger.info(f"✅ 订阅白名单模式: {len(streams)} 个 {self.quote_asset} 交易对的1秒K线数据")
                     logger.info(f"   订阅列表: {', '.join(self.subscribed_symbols[:10])}{'...' if len(self.subscribed_symbols) > 10 else ''}")
                 else:
-                    logger.info(f"订阅 {len(streams)} 个 {self.quote_asset} 交易对的完整 ticker 数据")
+                    logger.info(f"订阅 {len(streams)} 个 {self.quote_asset} 交易对的1秒K线数据")
 
                 # 使用 multiplex_socket 订阅多个流（支持 async/await）
                 self._ts = self._bm.multiplex_socket(streams)
@@ -438,46 +461,107 @@ class BinanceWebSocketClient:
     async def _process_single_message(self, data: Dict):
         """处理单个消息
 
-        支持两种消息格式:
-        1. multiplex_socket 格式: {"stream": "btcusdt@ticker", "data": {...}}
-        2. 直接 ticker 格式: {"e": "24hrTicker", ...}
+        ✅ 修复：支持K线和Ticker消息
+        支持的消息格式:
+        1. multiplex_socket 格式: {"stream": "btcusdt@kline_1s", "data": {...}}
+        2. 直接消息格式: {"e": "kline", ...}
         """
         # 检查是否是 multiplex_socket 格式
         if 'stream' in data and 'data' in data:
-            # multiplex_socket 格式: {"stream": "btcusdt@ticker", "data": {...}}
-            ticker_data = data['data']
-            event_type = ticker_data.get('e', '')
-            logger.debug(f"收到 multiplex 消息: stream={data['stream']}, event_type={event_type}")
+            # multiplex_socket 格式
+            inner_data = data['data']
+            event_type = inner_data.get('e', '')
+            stream = data.get('stream', '')
+            logger.debug(f"收到 multiplex 消息: stream={stream}, event_type={event_type}")
         else:
-            # 直接 ticker 格式
-            ticker_data = data
+            # 直接消息格式
+            inner_data = data
             event_type = data.get('e', '')
-            logger.debug(f"收到直接 ticker 消息: event_type={event_type}")
+            stream = ''
+            logger.debug(f"收到直接消息: event_type={event_type}")
 
-        if event_type == '24hrMiniTicker':
+        # ✅ 处理1秒K线消息
+        if event_type == 'kline':
+            await self._process_kline_message(inner_data)
+        elif event_type == '24hrMiniTicker':
             # Mini ticker数据（来自miniticker_socket）
-            ticker = TickerData.from_dict(ticker_data)
+            ticker = TickerData.from_dict(inner_data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
             else:
-                logger.debug(f"MiniTicker解析失败: {ticker_data}")
+                logger.debug(f"MiniTicker解析失败: {inner_data}")
         elif event_type == '24hrTicker':
             # 完整ticker数据（24小时ticker）- 包含所有算法需要的字段
-            ticker = TickerData.from_dict(ticker_data)
+            ticker = TickerData.from_dict(inner_data)
             if ticker:
                 self.ticker_cache[ticker.symbol] = ticker
                 await self._call_ticker_callbacks(ticker)
                 logger.debug(f"处理完整ticker: {ticker.symbol}, 价格变动: {ticker.price_change_percent:+.2f}%")
             else:
-                logger.debug(f"Ticker解析失败: {ticker_data}")
+                logger.debug(f"Ticker解析失败: {inner_data}")
         elif event_type == 'error':
             # 错误消息
-            logger.error(f"收到错误消息: {ticker_data}")
+            logger.error(f"收到错误消息: {inner_data}")
             self.errors_count += 1
         else:
             # 其他类型的消息
-            logger.debug(f"忽略事件类型: {event_type}, 数据: {ticker_data}")
+            logger.debug(f"忽略事件类型: {event_type}, 数据: {inner_data}")
+
+    async def _process_kline_message(self, kline_data: Dict):
+        """✅ 处理1秒K线消息
+
+        K线消息格式:
+        {
+          "e": "kline",
+          "E": 1672515782136,
+          "s": "BNBBTC",
+          "k": {
+            "t": 1672515780000,    # Kline start time
+            "T": 1672515839999,    # Kline close time
+            "s": "BNBBTC",         # Symbol
+            "i": "1s",             # Interval: 1秒
+            "o": "0.0010",         # Open price
+            "c": "0.0020",         # Close price
+            "h": "0.0025",         # High price
+            "l": "0.0015",         # Low price
+            "v": "1000",           # ✅ Base asset volume（真实的1秒总成交量）
+            "n": 100,              # Number of trades
+            "x": true,             # ✅ Is this kline closed?
+            "q": "1.0000",         # Quote asset volume
+          }
+        }
+        """
+        try:
+            k = kline_data.get('k', {})
+
+            # ✅ 只处理已关闭的K线（x=True）
+            if not k.get('x', False):
+                logger.debug(f"K线未关闭，跳过处理")
+                return
+
+            # 创建Kline对象
+            kline = Kline(
+                symbol=k.get('s', ''),
+                open=float(k.get('o', 0)),
+                high=float(k.get('h', 0)),
+                low=float(k.get('l', 0)),
+                close=float(k.get('c', 0)),
+                volume=float(k.get('v', 0)),  # ✅ 真实的1秒K线成交量
+                timestamp=pd.to_datetime(k.get('t', 0), unit='ms')
+            )
+
+            logger.debug(f"✅ 处理1秒K线: {kline.symbol}, OHLC: {kline.open}/{kline.high}/{kline.low}/{kline.close}, Volume: {kline.volume}")
+
+            # 调用K线回调
+            if self.kline_callbacks:
+                await self._call_kline_callbacks(kline)
+            else:
+                logger.warning(f"⚠️ 没有注册K线回调函数")
+
+        except Exception as e:
+            logger.error(f"处理K线消息失败: {e}, 数据: {kline_data}")
+            self.errors_count += 1
 
     async def _handle_connection_error(self, error: Exception):
         """处理连接错误"""

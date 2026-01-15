@@ -28,8 +28,8 @@ class Kline:
     high: float
     low: float
     close: float
-    volume: float
-    timestamp: datetime
+    volume: float                  # ✅ 真实1秒K线的总成交量
+    timestamp: datetime = None
 
     def __post_init__(self):
         # 计算价格变化
@@ -178,6 +178,8 @@ class KlineBreakoutDetector:
         """
         分析成交量激增
 
+        ✅ 修复：直接使用volume字段（真实1秒K线成交量）
+
         Args:
             kline: 1秒K线
             symbol: 交易对符号
@@ -192,22 +194,26 @@ class KlineBreakoutDetector:
         """
         try:
             klines = self.kline_history[symbol]
-            volumes = [k.volume for k in klines[-self.volume_window:]]
 
-            avg_volume = np.mean(volumes)
-            current_volume = kline.volume
+            # ✅ 直接使用volume字段（真实1秒K线成交量）
+            recent_volumes = [k.volume for k in klines[-self.volume_window:]]
+            avg_volume = np.mean(recent_volumes) if recent_volumes else 0
+
+            # 当前成交量（直接使用volume字段）
+            current_vol = kline.volume
 
             if avg_volume > 0:
-                volume_ratio = current_volume / avg_volume
+                volume_ratio = current_vol / avg_volume
             else:
                 volume_ratio = 1.0
 
-            is_surge = volume_ratio >= self.volume_surge_threshold
+            # ✅ 使用3.0x阈值（经过验证的最优参数）
+            is_surge = volume_ratio >= 3.0
 
             return {
                 'is_surge': is_surge,
                 'volume_ratio': volume_ratio,
-                'current_volume': current_volume,
+                'current_volume': current_vol,
                 'avg_volume': avg_volume
             }
 

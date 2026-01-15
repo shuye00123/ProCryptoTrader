@@ -42,8 +42,8 @@ class FixedDataLoader:
         Returns:
             包含OHLCV数据的DataFrame
         """
-        # 将 '/' 替换为 '-'
-        safe_symbol = symbol.replace('/', '-')
+        # 将 '/' 替换为 ''，得到正确的目录名 (如: BTC/USDT -> BTCUSDT)
+        safe_symbol = symbol.replace('/', '')
 
         # 构建文件路径
         file_path = self.data_dir / safe_symbol / f"{timeframe}.parquet"

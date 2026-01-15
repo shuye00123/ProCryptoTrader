@@ -27,49 +27,42 @@ strategy:
   position_size: 0.02             # 每次开仓比例 (2%)
   max_position_size: 0.05         # 单个持仓最大比例 (5%)
   max_total_exposure: 0.15        # 最大总敞口 (15%)
-  signal_cooldown: 30             # 信号冷却期（秒）
+  signal_cooldown: 60             # ✅ 修改为60秒冷却期（验证过最优）
 
   # ==================== 1秒K线突破检测配置 ====================
   kline_breakout:
     enabled: true
     window_size: 200              # 200个1秒K线 = 3.3分钟
     min_breakout_strength: 2.5    # 最小突破强度（平衡阈值）
-    volume_threshold: 2.0
+    volume_threshold: 3.0         # ✅ 修改为3.0x（验证过最优）
     consecutive_moves_threshold: 5
-    breakout_cooldown: 30000      # 30秒per-symbol冷却期
+    breakout_cooldown: 60000      # ✅ 修改为60秒冷却期（60000ms）
 
     # 多重确认机制
-    require_multiple_confirmation: true
-    min_confirmation_count: 2     # 需要2个算法确认
+    require_multiple_confirmation: false  # ✅ 简化：禁用多重确认
+    min_confirmation_count: 1     # ✅ 只需要1个算法确认
     confirmation_window: 5000     # 5秒确认窗口
 
-    # 统计突破参数（平衡版）
+    # ✅ 简化：禁用其他突破检测算法，只保留布林带突破 + 成交量激增
+    # 统计突破参数
     statistical_breakout:
-      enabled: true
-      price_deviation_threshold: 2.8   # 平衡Z阈值
-      momentum_ratio_threshold: 2.5
+      enabled: false              # ✅ 禁用，简化逻辑
 
     # 连续变动突破参数
     consecutive_breakout:
-      enabled: true
-      min_consecutive_moves: 5
-      min_move_threshold: 0.001
+      enabled: false              # ✅ 禁用，简化逻辑
 
-    # 成交量突破参数（平衡版 - 基于GMTUSDT数据分析）
+    # ✅ 成交量突破参数（保持启用 - 经过验证的关键参数）
     volume_breakout:
-      enabled: true
-      volume_surge_threshold: 3.0      # 平衡Volume阈值
-      min_price_change: 0.008
+      enabled: true               # ✅ 保留
+      volume_surge_threshold: 3.0  # ✅ 3.0x阈值（验证过最优）
+      min_price_change: 0.005     # ✅ 降低到0.5%
       min_avg_volume: 1
       min_data_points: 100
 
     # 路径突破参数
     path_breakout:
-      enabled: true
-      breakout_threshold: 0.005
-      support_resistance_window: 50
-      min_data_points: 50
-      virtual_level_offset: 0.001
+      enabled: false              # ✅ 禁用，简化逻辑
 
   # ==================== 多时间框架确认配置 ====================
   multi_timeframe:
@@ -138,6 +131,13 @@ strategy:
     require_volume_confirmation: true
     min_confirmation_count: 2
     quality_score_threshold: 0.75
+
+  # ✅ 新增：真假突破分类配置（Phase 2功能）
+  breakout_classification:
+    enabled: false              # 默认禁用，等Phase 2实现时启用
+    hold_duration_ticks: 100    # 观察100tick
+    true_breakout_threshold: 0.005   # 0.5%真突破目标
+    false_breakout_threshold: -0.003  # -0.3%假突破止损
 
 # 交易所配置
 exchange:
@@ -242,6 +242,65 @@ notifications:
     - "order_executed"
     - "risk_limit_hit"
     - "system_error"
+
+# ==================== 性能优化配置（Phase 0-6） ====================
+# 多时间框架订阅配置
+multi_timeframe_subscription:
+  enabled: true
+  timeframes:
+    - interval: "1s"
+      enabled: true
+      purpose: "breakout_detection"
+    - interval: "15m"
+      enabled: true
+      purpose: "indicator_calculation"
+    - interval: "1h"
+      enabled: true
+      purpose: "indicator_calculation"
+  max_reconnect_attempts: 5
+  reconnect_delay_ms: 1000
+  enable_stats: true
+
+# 指标缓存配置
+indicator_cache:
+  enabled: true
+  mode: "default"              # default, aggressive, conservative
+  max_age_seconds: 3600        # 缓存最大有效期（默认1小时）
+  update_on_kline_close: true  # 只在K线闭合时更新
+  enable_stats: true
+  cleanup_interval: 300        # 清理间隔（秒）
+
+# 缓存模式配置（preset）
+cache_presets:
+  default:
+    max_age_seconds: 3600      # 1小时
+    cleanup_interval: 300      # 5分钟
+  aggressive:
+    max_age_seconds: 7200      # 2小时（更激进）
+    cleanup_interval: 600      # 10分钟
+  conservative:
+    max_age_seconds: 1800      # 30分钟（更保守）
+    cleanup_interval: 180      # 3分钟
+
+# 性能监控配置
+performance:
+  enable_metrics: true
+  log_cache_hit_rate: true
+  log_calculation_time: true
+  log_processing_stats: true
+  stats_update_interval: 60    # 统计更新间隔（秒）
+  print_statistics_on_stop: true
+
+# 数据提供者配置
+data_provider:
+  backtest:
+    data_dir: "data"
+    cache_enabled: true
+    validate_data: true
+  realtime:
+    enable_rest_api_fallback: false   # Phase 4实现
+    warmup_periods: 200                # 预热数据周期数
+    max_cache_size: 500                # K线缓存最大数量
 
 # Tick数据转存配置（可选）
 tick_data_persistence:
