@@ -180,6 +180,10 @@ class MultiTimeframeKlineSubscriber:
                     client = Client(api_key, api_secret)
                 else:
                     client = Client()  # 公共数据流不需要API密钥
+
+                # 创建BinanceSocketManager（也需要清除代理环境变量）
+                self.bsm = BinanceSocketManager(client)
+                self.ws_running = True
             finally:
                 # 恢复环境变量（如果存在）
                 if old_http_proxy:
@@ -190,9 +194,6 @@ class MultiTimeframeKlineSubscriber:
                     os.environ['HTTP_PROXY'] = old_HTTP_PROXY
                 if old_HTTPS_PROXY:
                     os.environ['HTTPS_PROXY'] = old_HTTPS_PROXY
-
-            self.bsm = BinanceSocketManager(client)
-            self.ws_running = True
 
             # 为每个时间框架创建订阅
             for timeframe in self.timeframes:
