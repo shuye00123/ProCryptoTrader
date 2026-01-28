@@ -156,6 +156,53 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         logger.info(f"[{self.name}] 模式: {'回测' if self.is_backtest else '实盘'}")
 
     # =========================================================================
+    # 高频策略统一接口（与HighFrequencyBreakoutStrategy保持一致）
+    # =========================================================================
+
+    async def initialize(self, initial_balance: float = 10000.0):
+        """
+        异步初始化策略（与HighFrequencyBreakoutStrategy接口一致）
+
+        Args:
+            initial_balance: 初始资金
+        """
+        self.initial_balance = initial_balance
+        self.current_balance = initial_balance
+
+        logger.info(f"[{self.name}] 策略异步初始化完成")
+        logger.info(f"[{self.name}] 初始余额: {initial_balance} USDT")
+
+    async def start_async_processing(self):
+        """
+        启动异步数据处理（与HighFrequencyBreakoutStrategy接口一致）
+
+        由HighFrequencyTrader调用，启动WebSocket订阅和信号处理
+        """
+        # 获取API密钥
+        exchange_config = self.config.get('exchange', {})
+        api_key = exchange_config.get('api_key') or None
+        api_secret = exchange_config.get('api_secret') or None
+
+        logger.info(f"[{self.name}] 启动异步数据处理...")
+
+        # 启动WebSocket订阅
+        await self.start_1s_kline_subscription(api_key, api_secret)
+
+        # 保持运行，处理信号
+        while self.ws_running:
+            await asyncio.sleep(1)
+
+    def set_execution_engine(self, execution_engine):
+        """
+        设置执行引擎（与HighFrequencyBreakoutStrategy接口一致）
+
+        Args:
+            execution_engine: 执行引擎实例（FastExecutionEngine）
+        """
+        self.execution_engine = execution_engine
+        logger.info(f"[{self.name}] 执行引擎已设置")
+
+    # =========================================================================
     # BaseStrategy抽象方法实现
     # =========================================================================
 
@@ -616,8 +663,8 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                                f"置信度: {confirmed_signal.confidence:.2f}, "
                                f"原因: {confirmed_signal.reason}")
 
-                    # 触发信号处理（这里可以添加回调或事件系统）
-                    # 例如：await self._execute_signal(confirmed_signal)
+                    # 执行交易信号
+                    await self._execute_signal(confirmed_signal)
                 else:
                     logger.info(f"[{symbol}] ❌ 未通过技术指标确认")
 
@@ -1040,3 +1087,66 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         df.set_index('timestamp', inplace=True)
 
         return df
+
+    # =========================================================================
+    # 信号执行逻辑（与HighFrequencyBreakoutStrategy统一）
+    # =========================================================================
+
+    async def _execute_signal(self, signal: Signal):
+        """
+        执行交易信号（异步版本）
+
+        Args:
+            signal: 交易信号
+        """
+        try:
+            # 检查是否有执行引擎
+            if hasattr(self, 'execution_engine') and self.execution_engine:
+                logger.info(f"[{signal.symbol}] 📤 使用FastExecutionEngine执行信号: {signal.signal_type.value}")
+
+                # 转换为ExecutionService的Signal格式
+                from core.models.signal import Signal as ExecSignal
+                from core.models.signal import SignalType as ExecSignalType
+
+                # 映射信号类型
+                signal_type_map = {
+                    SignalType.OPEN_LONG: ExecSignalType.OPEN_LONG,
+                    SignalType.OPEN_SHORT: ExecSignalType.OPEN_SHORT,
+                    SignalType.CLOSE_LONG: ExecSignalType.CLOSE_LONG,
+                    SignalType.CLOSE_SHORT: ExecSignalType.CLOSE_SHORT,
+                }
+
+                exec_signal_type = signal_type_map.get(signal.signal_type)
+
+                if exec_signal_type:
+                    exec_signal = ExecSignal(
+                        symbol=signal.symbol,
+                        signal_type=exec_signal_type,
+                        amount=signal.amount,
+                        price=signal.price,
+                        confidence=signal.confidence,
+                        reason=signal.reason
+                    )
+
+                    # 异步执行信号
+                    result = await self.execution_engine.execute_signal(exec_signal)
+
+                    if result and result.is_successful():
+                        logger.info(f"[{signal.symbol}] ✅ 信号执行成功: {result.order_id if hasattr(result, 'order_id') else 'OK'}")
+                    else:
+                        logger.warning(f"[{signal.symbol}] ⚠️ 信号执行失败或被拒绝")
+                else:
+                    logger.warning(f"[{signal.symbol}] ⚠️ 不支持的信号类型: {signal.signal_type}")
+
+            else:
+                # 没有执行引擎，记录信号但不执行（模拟模式）
+                logger.info(f"[{signal.symbol}] 📊 信号已生成（模拟模式，未执行）")
+                logger.info(f"   类型: {signal.signal_type.value}")
+                logger.info(f"   价格: {signal.price}")
+                logger.info(f"   数量: {signal.amount}")
+                logger.info(f"   置信度: {signal.confidence:.2f}")
+
+        except Exception as e:
+            logger.error(f"[{signal.symbol}] ❌ 执行信号时出错: {e}")
+            import traceback
+            logger.error(traceback.format_exc())

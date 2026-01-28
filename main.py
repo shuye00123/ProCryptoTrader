@@ -211,13 +211,10 @@ class ProCryptoTrader:
             strategy_config = config.get('strategy', {})
             strategy_name = strategy_config.get('name', '')
 
-            # 检查是否为高频策略
-            is_hf_strategy = strategy_name in [
-                'HighFrequencyBreakout',
-                'HighFrequency',
-                'HFBreakout',
-                'HighFrequencyBreakoutStrategy'  # 添加完整策略名称
-            ]
+            # 使用策略工厂判断是否为高频策略
+            from core.strategy.strategy_factory import StrategyFactory
+
+            is_hf_strategy = StrategyFactory.is_hf_strategy(strategy_name)
 
             if mode == 'live':
                 logger.warning("⚠️  即将开始实盘交易!")
@@ -238,13 +235,13 @@ class ProCryptoTrader:
 
             # 根据策略类型选择不同的运行方式
             if is_hf_strategy:
-                # 高频策略特殊处理
-                logger.info("启动高频突破策略...")
+                # 高频策略统一使用HighFrequencyTrader
+                logger.info(f"启动高频策略: {strategy_name}")
 
-                # 导入高频策略交易器
+                # 导入高频交易器
                 from core.live.high_frequency_trader import HighFrequencyTrader
 
-                # 创建高频交易实例
+                # 创建高频交易实例（内部使用策略工厂）
                 trader = HighFrequencyTrader(config_path)
 
                 # 运行高频交易

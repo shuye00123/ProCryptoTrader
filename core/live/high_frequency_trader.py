@@ -164,16 +164,36 @@ class HighFrequencyTrader:
                 config=execution_config
             )
 
-            # 3. 初始化高频策略
+            # 3. 初始化策略（使用策略工厂）
+            from core.strategy.strategy_factory import StrategyFactory
+
+            try:
+                self.strategy = StrategyFactory.create_strategy(self.config)
+                logger.info(f"✅ 策略工厂创建策略成功: {self.strategy.name}")
+            except Exception as e:
+                logger.error(f"❌ 策略工厂创建策略失败: {e}")
+                raise
+
+            # 4. 初始化策略（兼容异步和同步接口）
             strategy_config = self.config.get('strategy', {})
-            self.strategy = HighFrequencyBreakoutStrategy(self.config)
-
-            # 4. 初始化策略
             initial_balance = strategy_config.get('initial_balance', 10000.0)
-            await self.strategy.initialize(initial_balance)
 
-            # 5. 设置策略的执行引擎
-            self.strategy.execution_engine = self.execution_engine
+            # 检查策略是否支持异步初始化
+            if hasattr(self.strategy, 'initialize'):
+                # 高频策略：异步初始化
+                await self.strategy.initialize(initial_balance)
+            else:
+                # 兼容旧策略：同步初始化
+                self.strategy.initial_balance = initial_balance
+                logger.info(f"策略使用同步初始化: {self.strategy.name}")
+
+            # 5. 设置策略的执行引擎（兼容不同接口）
+            if hasattr(self.strategy, 'set_execution_engine'):
+                # 使用setter方法
+                self.strategy.set_execution_engine(self.execution_engine)
+            else:
+                # 直接设置属性
+                self.strategy.execution_engine = self.execution_engine
 
             logger.info("高频交易组件初始化完成")
             return True
