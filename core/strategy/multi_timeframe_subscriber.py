@@ -161,17 +161,35 @@ class MultiTimeframeKlineSubscriber:
             return
 
         try:
-            # 导入BinanceSocketManager
+            # 导入BinanceSocketManager（使用python-binance包）
             from binance import BinanceSocketManager
             from binance.client import Client
+            import os
 
             logger.info("[MultiTimeframeSubscriber] 正在创建BinanceSocketManager...")
 
-            # 创建客户端（如果提供了API密钥）
-            if api_key and api_secret:
-                client = Client(api_key, api_secret)
-            else:
-                client = Client()  # 公共数据流不需要API密钥
+            # 临时清除代理环境变量以避免 'https_proxy' 错误
+            old_http_proxy = os.environ.pop('http_proxy', None)
+            old_https_proxy = os.environ.pop('https_proxy', None)
+            old_HTTP_PROXY = os.environ.pop('HTTP_PROXY', None)
+            old_HTTPS_PROXY = os.environ.pop('HTTPS_PROXY', None)
+
+            try:
+                # 创建客户端（如果提供了API密钥）
+                if api_key and api_secret:
+                    client = Client(api_key, api_secret)
+                else:
+                    client = Client()  # 公共数据流不需要API密钥
+            finally:
+                # 恢复环境变量（如果存在）
+                if old_http_proxy:
+                    os.environ['http_proxy'] = old_http_proxy
+                if old_https_proxy:
+                    os.environ['https_proxy'] = old_https_proxy
+                if old_HTTP_PROXY:
+                    os.environ['HTTP_PROXY'] = old_HTTP_PROXY
+                if old_HTTPS_PROXY:
+                    os.environ['HTTPS_PROXY'] = old_HTTPS_PROXY
 
             self.bsm = BinanceSocketManager(client)
             self.ws_running = True
