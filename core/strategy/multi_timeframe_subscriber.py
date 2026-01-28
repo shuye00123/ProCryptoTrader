@@ -215,7 +215,7 @@ class MultiTimeframeKlineSubscriber:
 
             # 创建multiplex socket
             socket = self.bsm.multiplex_socket(streams)
-            await socket.__aenter__()
+            # 注意：不在这里调用 __aenter__()，而是在 _process_timeframe_stream 中使用 async with
             self.sockets[timeframe] = socket
 
             # 启动异步处理任务
@@ -235,7 +235,8 @@ class MultiTimeframeKlineSubscriber:
         """
         处理特定时间框架的K线数据流
 
-        该方法是一个无限循环，持续接收和处理WebSocket消息。
+        根据python-binance官方文档，使用async with + recv()方式接收消息
+        参考: https://python-binance.readthedocs.io/en/latest/websockets.html
 
         Args:
             timeframe: 时间框架
@@ -250,31 +251,36 @@ class MultiTimeframeKlineSubscriber:
         logger.info(f"[MultiTimeframeSubscriber] {timeframe}数据流处理任务已启动")
 
         try:
-            async for msg in socket:
-                if not self.ws_running:
-                    logger.debug(f"[MultiTimeframeSubscriber] {timeframe}停止接收数据")
-                    break
+            # 使用上下文管理器接收消息（官方推荐方式）
+            async with socket as tscm:
+                while self.ws_running:
+                    try:
+                        # 使用 recv() 方法接收消息
+                        msg = await tscm.recv()
 
-                try:
-                    # 更新统计
-                    if self.enable_stats:
-                        self.stats[timeframe]['messages_received'] += 1
-                        self.stats[timeframe]['last_message_time'] = datetime.now()
+                        if msg is None:
+                            logger.debug(f"[MultiTimeframeSubscriber] {timeframe}接收到空消息，停止")
+                            break
 
-                    # 调用注册的处理器
-                    if asyncio.iscoroutinefunction(handler):
-                        await handler(msg)
-                    else:
-                        handler(msg)
+                        # 更新统计
+                        if self.enable_stats:
+                            self.stats[timeframe]['messages_received'] += 1
+                            self.stats[timeframe]['last_message_time'] = datetime.now()
 
-                    # 更新处理统计
-                    if self.enable_stats:
-                        self.stats[timeframe]['messages_processed'] += 1
+                        # 调用注册的处理器
+                        if asyncio.iscoroutinefunction(handler):
+                            await handler(msg)
+                        else:
+                            handler(msg)
 
-                except Exception as e:
-                    logger.error(f"[MultiTimeframeSubscriber] {timeframe}消息处理错误: {e}")
-                    if self.enable_stats:
-                        self.stats[timeframe]['errors'] += 1
+                        # 更新处理统计
+                        if self.enable_stats:
+                            self.stats[timeframe]['messages_processed'] += 1
+
+                    except Exception as e:
+                        logger.error(f"[MultiTimeframeSubscriber] {timeframe}消息处理错误: {e}")
+                        if self.enable_stats:
+                            self.stats[timeframe]['errors'] += 1
 
         except asyncio.CancelledError:
             logger.info(f"[MultiTimeframeSubscriber] {timeframe}处理任务被取消")
