@@ -644,4 +644,25 @@ def create_indicator_cache(
     if config:
         base_config.update(config)
 
-    return IndicatorCacheManager(**base_config)
+    # 过滤支持的参数（__init__只接受max_age_seconds, enabled, config）
+    supported_params = {
+        'max_age_seconds',
+        'enabled'
+    }
+
+    # 提取支持的参数
+    init_params = {
+        k: v for k, v in base_config.items()
+        if k in supported_params
+    }
+
+    # 不支持的参数放入config字典中传递
+    unsupported_params = {
+        k: v for k, v in base_config.items()
+        if k not in supported_params
+    }
+
+    if unsupported_params:
+        init_params['config'] = unsupported_params
+
+    return IndicatorCacheManager(**init_params)
