@@ -173,6 +173,12 @@ class MultiTimeframeKlineSubscriber:
             else:
                 client = Client()  # 公共数据流不需要API密钥
 
+            # 修复python-binance的bug：手动添加https_proxy属性
+            # BinanceSocketManager._get_socket() 会尝试访问 client.https_proxy
+            # 但 BaseClient.__init__() 中 https_proxy 只是局部变量，不是实例属性
+            client.https_proxy = None
+            client.http_proxy = None
+
             self.bsm = BinanceSocketManager(client)
             self.ws_running = True
 
