@@ -278,7 +278,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 return all_symbols
 
             finally:
-                await client.close()
+                await client.close_connection()
 
         except Exception as e:
             logger.error(f"[{self.name}] 获取全市场交易对失败: {e}")
