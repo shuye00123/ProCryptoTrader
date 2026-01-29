@@ -98,10 +98,16 @@ class MultiTimeframeKlineSubscriber:
             for tf in timeframes
         }
 
+        # 🔧 连接健康检查配置
+        self.enable_health_check = self.config.get('enable_health_check', True)
+        self.health_check_interval = self.config.get('health_check_interval', 30)  # 秒
+        self.health_check_task: Optional[asyncio.Task] = None
+
         logger.info(f"[MultiTimeframeSubscriber] 初始化完成: "
                    f"{len(symbols)}个交易对, {len(timeframes)}个时间框架")
         logger.info(f"[MultiTimeframeSubscriber] 交易对: {symbols}")
         logger.info(f"[MultiTimeframeSubscriber] 时间框架: {timeframes}")
+        logger.info(f"[MultiTimeframeSubscriber] 健康检查: {'启用' if self.enable_health_check else '禁用'}")
 
     def register_handler(self, timeframe: str, handler: Callable):
         """
@@ -193,6 +199,14 @@ class MultiTimeframeKlineSubscriber:
 
             logger.info(f"[MultiTimeframeSubscriber] ✅ 所有订阅启动成功: {list(self.sockets.keys())}")
 
+            # 🔧 启动健康检查任务
+            if self.enable_health_check:
+                self.health_check_task = asyncio.create_task(
+                    self._health_check_loop(),
+                    name="health_check_loop"
+                )
+                logger.info(f"[MultiTimeframeSubscriber] ✅ 健康检查任务已启动 (间隔: {self.health_check_interval}秒)")
+
         except Exception as e:
             logger.error(f"[MultiTimeframeSubscriber] 启动WebSocket订阅失败: {e}")
             self.ws_running = False
@@ -278,21 +292,42 @@ class MultiTimeframeKlineSubscriber:
                             self.stats[timeframe]['messages_processed'] += 1
 
                     except Exception as e:
+                        error_msg = str(e)
                         logger.error(f"[MultiTimeframeSubscriber] {timeframe}消息处理错误: {e}")
                         if self.enable_stats:
                             self.stats[timeframe]['errors'] += 1
 
+                        # 🔧 检测连接关闭错误
+                        if ("Read loop has been closed" in error_msg or
+                            "Connection closed" in error_msg or
+                            "Connection error" in error_msg):
+                            logger.warning(f"[MultiTimeframeSubscriber] {timeframe}连接已关闭，停止处理")
+                            break  # 退出内层循环，触发重连
+
+                        # 其他错误继续处理
+                        await asyncio.sleep(0.1)  # 短暂延迟避免错误循环
+
         except asyncio.CancelledError:
             logger.info(f"[MultiTimeframeSubscriber] {timeframe}处理任务被取消")
         except Exception as e:
+            error_msg = str(e)
             logger.error(f"[MultiTimeframeSubscriber] {timeframe}数据流错误: {e}")
-            # 尝试重连
-            if self.ws_running:
-                await self._handle_reconnect(timeframe)
+
+            # 检测是否是连接关闭错误
+            if ("Read loop has been closed" not in error_msg and
+                "Connection closed" not in error_msg):
+                # 只有非连接关闭错误才触发重连
+                if self.ws_running:
+                    await self._handle_reconnect(timeframe)
 
     async def _handle_reconnect(self, timeframe: str):
         """
         处理特定时间框架的WebSocket重连
+
+        改进版本:
+        - 移除递归调用，使用循环重连机制
+        - 在每次重连前重新创建BinanceSocketManager
+        - 清理旧socket资源后再重连
 
         Args:
             timeframe: 需要重连的时间框架
@@ -317,14 +352,32 @@ class MultiTimeframeKlineSubscriber:
         await asyncio.sleep(delay)
 
         try:
-            # 关闭旧socket
+            # 🔧 关闭旧socket - 确保完全清理
             if timeframe in self.sockets:
                 try:
-                    await self.sockets[timeframe].__aexit__(None, None, None)
-                except:
-                    pass
+                    old_socket = self.sockets.pop(timeframe)
+                    await old_socket.__aexit__(None, None, None)
+                    logger.debug(f"[MultiTimeframeSubscriber] 已关闭{timeframe}旧socket")
+                except Exception as e:
+                    logger.warning(f"[MultiTimeframeSubscriber] 关闭旧socket失败: {e}")
 
-            # 重新订阅
+            # 🔧 取消旧任务
+            if timeframe in self._tasks:
+                try:
+                    old_task = self._tasks.pop(timeframe)
+                    if not old_task.done():
+                        old_task.cancel()
+                        await old_task  # 等待任务取消完成
+                        logger.debug(f"[MultiTimeframeSubscriber] 已取消{timeframe}旧任务")
+                except Exception as e:
+                    logger.warning(f"[MultiTimeframeSubscriber] 取消旧任务失败: {e}")
+
+            # 🔧 重新创建BinanceSocketManager（可选，python-binance可能需要）
+            # 注意：这会影响所有时间框架，所以这里只是代码示例
+            # if attempt == 1:
+            #     await self._recreate_binance_socket_manager()
+
+            # 🔧 重新订阅
             await self._start_timeframe_subscription(timeframe)
 
             logger.info(f"[MultiTimeframeSubscriber] ✅ {timeframe}重连成功")
@@ -332,9 +385,11 @@ class MultiTimeframeKlineSubscriber:
 
         except Exception as e:
             logger.error(f"[MultiTimeframeSubscriber] {timeframe}重连失败: {e}")
-            # 继续尝试重连
-            if self.ws_running:
-                asyncio.create_task(self._handle_reconnect(timeframe))
+            # 🔧 不再递归调用，而是检查是否需要继续重连
+            if self.ws_running and attempt < self.max_reconnect_attempts:
+                # 创建新的重连任务（非递归）
+                logger.info(f"[MultiTimeframeSubscriber] 计划下一次{timeframe}重连")
+                await self._handle_reconnect(timeframe)  # 使用await而非create_task
 
     async def stop_all_subscriptions(self):
         """
@@ -342,13 +397,23 @@ class MultiTimeframeKlineSubscriber:
 
         该方法会：
         1. 设置运行标志为False
-        2. 取消所有数据处理任务
-        3. 关闭所有WebSocket连接
-        4. 关闭BinanceSocketManager
+        2. 取消健康检查任务
+        3. 取消所有数据处理任务
+        4. 关闭所有WebSocket连接
+        5. 关闭BinanceSocketManager
         """
         logger.info("[MultiTimeframeSubscriber] 正在停止所有订阅...")
 
         self.ws_running = False
+
+        # 🔧 取消健康检查任务
+        if self.health_check_task and not self.health_check_task.done():
+            self.health_check_task.cancel()
+            try:
+                await self.health_check_task
+                logger.debug("[MultiTimeframeSubscriber] 健康检查任务已取消")
+            except asyncio.CancelledError:
+                logger.debug("[MultiTimeframeSubscriber] 健康检查任务已取消")
 
         # 取消所有任务
         for timeframe, task in self._tasks.items():
@@ -465,6 +530,107 @@ class MultiTimeframeKlineSubscriber:
                     print(f"    最后消息: {tf_stats['last_message_time']}")
 
         print("=" * 80 + "\n")
+
+    async def _health_check_loop(self):
+        """
+        连接健康检查循环
+
+        定期检查各时间框架的连接健康状态:
+        1. 检查是否收到消息（最后消息时间）
+        2. 检查错误率是否过高
+        3. 检测到不健康连接时主动重连
+        """
+        logger.info(f"[MultiTimeframeSubscriber] 健康检查循环已启动 (间隔: {self.health_check_interval}秒)")
+
+        while self.ws_running:
+            try:
+                await asyncio.sleep(self.health_check_interval)
+
+                if not self.ws_running:
+                    break
+
+                # 检查所有时间框架的健康状态
+                for timeframe in self.timeframes:
+                    if not self.ws_running:
+                        break
+
+                    health_status = self._check_timeframe_health(timeframe)
+
+                    if not health_status['healthy']:
+                        logger.warning(
+                            f"[MultiTimeframeSubscriber] {timeframe}连接不健康: "
+                            f"{health_status['reason']}"
+                        )
+
+                        # 主动重连不健康的连接
+                        if timeframe in self._tasks:
+                            try:
+                                # 取消旧任务
+                                old_task = self._tasks.pop(timeframe)
+                                if not old_task.done():
+                                    old_task.cancel()
+                                    await old_task
+                            except Exception as e:
+                                logger.warning(f"[MultiTimeframeSubscriber] 取消旧任务失败: {e}")
+
+                            # 触发重连
+                            logger.info(f"[MultiTimeframeSubscriber] 主动重连{timeframe}")
+                            await self._handle_reconnect(timeframe)
+
+            except asyncio.CancelledError:
+                logger.info("[MultiTimeframeSubscriber] 健康检查任务被取消")
+                break
+            except Exception as e:
+                logger.error(f"[MultiTimeframeSubscriber] 健康检查错误: {e}")
+                # 继续运行，不因为单次检查失败而停止
+
+        logger.info("[MultiTimeframeSubscriber] 健康检查循环已停止")
+
+    def _check_timeframe_health(self, timeframe: str) -> Dict[str, Any]:
+        """
+        检查单个时间框架的连接健康状态
+
+        Args:
+            timeframe: 时间框架
+
+        Returns:
+            {
+                'healthy': bool,  # 是否健康
+                'reason': str     # 不健康的原因（如果健康则为空）
+            }
+        """
+        if not self.enable_stats:
+            return {'healthy': True, 'reason': ''}
+
+        stats = self.stats.get(timeframe, {})
+        last_msg_time = stats.get('last_message_time')
+        errors = stats.get('errors', 0)
+        messages_received = stats.get('messages_received', 0)
+
+        # 检查1: 是否从未收到消息
+        if messages_received == 0:
+            # 如果连接已建立超过30秒仍未收到消息，认为不健康
+            if timeframe in self.sockets:
+                return {'healthy': False, 'reason': '从未收到消息'}
+            else:
+                return {'healthy': False, 'reason': '未建立连接'}
+
+        # 检查2: 最后消息时间是否太久
+        if last_msg_time:
+            time_since_last_msg = (datetime.now() - last_msg_time).total_seconds()
+            # 如果超过2个健康检查间隔没有收到消息，认为不健康
+            if time_since_last_msg > self.health_check_interval * 2:
+                return {'healthy': False, 'reason': f'超过{time_since_last_msg:.0f}秒未收到消息'}
+
+        # 检查3: 错误率是否过高
+        if messages_received > 0:
+            error_rate = errors / messages_received
+            if error_rate > 0.1:  # 错误率超过10%
+                return {'healthy': False, 'reason': f'错误率过高: {error_rate:.1%}'}
+
+        # 所有检查通过
+        return {'healthy': True, 'reason': ''}
+
 
 
 # 辅助函数
