@@ -14,7 +14,7 @@ pyarrow>=21.0.0                  # High-performance data storage and Parquet sup
 # WEBSOCKET AND REAL-TIME DATA LIBRARIES
 # ============================================================================
 websockets>=15.0.0              # WebSocket client for real-time market data
-aiohttp>=3.13.0                 # Async HTTP client for webhook notifications
+aiohttp>=3.13.3                 # Async HTTP client for webhook notifications
 
 # ============================================================================
 # TRADING AND EXCHANGE API LIBRARIES
