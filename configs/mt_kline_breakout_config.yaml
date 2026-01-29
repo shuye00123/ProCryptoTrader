@@ -175,13 +175,32 @@ monitoring:
 
 # 交易对配置
 symbols:
-  - "BTC-USDT"
-  - "ETH-USDT"
-  - "BNB-USDT"
+  - "AUTO"  # 🔥 全市场自动订阅模式（推荐）
+
+  # 或者手动指定交易对（注释掉上面的 AUTO）
+  # - "BTC-USDT"
+  # - "ETH-USDT"
+  # - "BNB-USDT"
 
 # WebSocket订阅配置
 websocket_subscribe:
   enabled: true
+
+  # 🔥 全市场订阅配置（当 symbols 设置为 "AUTO" 时生效）
+  all_market:
+    enabled: true              # 启用全市场订阅
+    quote_asset: "USDT"        # 报价资产（USDT/BUSD/USDC等）
+    min_volume_24h:     # 24小时最小成交量过滤（USDT），设为null不过滤
+    min_price:           # 最小价格过滤（可选），设为null不过滤
+    max_price:          # 最大价格过滤（可选），设为null不过滤
+    exclude_symbols:           # 排除的交易对列表（可选）
+      - "USDCUSDT"             # 排除稳定币对
+      - "TUSDUSDT"
+      - "BUSDUSDT"
+      - "BTCDOMUSDT"           # 排除指数
+      - "ETHDOMUSDT"
+
+  # ⚠️ 白名单模式（手动指定时使用，全市场模式下自动忽略）
   whitelist:
     - "BTCUSDT"
     - "ETHUSDT"

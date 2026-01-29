@@ -54,7 +54,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
         Args:
             config: 策略配置字典
-                - symbols: 交易对列表
+                - symbols: 交易对列表（支持 "AUTO" 自动获取全市场）
                 - kline_breakout: 1秒K线突破检测配置
                 - multi_timeframe: 多时间框架确认配置（Phase 2）
         """
@@ -65,7 +65,16 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
         # 交易对配置（转换格式：BTC-USDT -> BTCUSDT）
         self.symbols = config.get('symbols', [])
-        self.binance_symbols = [s.replace('-', '') for s in self.symbols]
+
+        # ✅ 支持全市场自动订阅
+        if len(self.symbols) == 1 and self.symbols[0].upper() == 'AUTO':
+            self.binance_symbols = ['AUTO']  # 临时标记，稍后异步获取
+            self.auto_fetch_symbols = True
+            logger.info(f"[{self.name}] 🔥 全市场自动订阅模式已启用")
+        else:
+            self.binance_symbols = [s.replace('-', '') for s in self.symbols]
+            self.auto_fetch_symbols = False
+            logger.info(f"[{self.name}] 交易对: {self.binance_symbols}")
 
         # ==================== 1秒K线突破检测器 ====================
         kline_config = config.get('strategy', {}).get('kline_breakout', {})
@@ -159,6 +168,125 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
     # 高频策略统一接口（与HighFrequencyBreakoutStrategy保持一致）
     # =========================================================================
 
+    async def _fetch_all_market_symbols(self) -> List[str]:
+        """
+        异步获取全市场交易对列表
+
+        根据配置自动从Binance获取所有符合条件的交易对：
+        - 指定报价资产（如USDT）
+        - 过滤低流动性币种
+        - 排除指定交易对
+
+        Returns:
+            List[str]: Binance格式的交易对列表，如 ['BTCUSDT', 'ETHUSDT', ...]
+        """
+        try:
+            from binance import AsyncClient
+
+            # 读取全市场订阅配置
+            ws_config = self.config.get('websocket_subscribe', {})
+            all_market_config = ws_config.get('all_market', {})
+
+            # 配置参数
+            quote_asset = all_market_config.get('quote_asset', 'USDT').upper()
+            min_volume = all_market_config.get('min_volume_24h')
+            min_price = all_market_config.get('min_price')
+            max_price = all_market_config.get('max_price')
+            exclude_symbols = set(all_market_config.get('exclude_symbols', []))
+            exclude_symbols.update([s.replace('-', '') for s in exclude_symbols.copy()])
+
+            logger.info(f"[{self.name}] 正在从Binance获取 {quote_asset} 交易对列表...")
+            logger.info(f"[{self.name}] 过滤条件:")
+            logger.info(f"  - 报价资产: {quote_asset}")
+            if min_volume:
+                logger.info(f"  - 最小24h成交量: {min_volume:,.0f} {quote_asset}")
+            if min_price:
+                logger.info(f"  - 最小价格: {min_price}")
+            if max_price:
+                logger.info(f"  - 最大价格: {max_price}")
+            if exclude_symbols:
+                logger.info(f"  - 排除数量: {len(exclude_symbols)} 个")
+
+            # 创建客户端（公开API，不需要密钥）
+            client = await AsyncClient.create()
+
+            try:
+                # 获取交易所信息
+                exchange_info = await client.get_exchange_info()
+
+                # 第一阶段：获取所有TRADING状态的交易对
+                all_symbols = []
+                for symbol_info in exchange_info.get('symbols', []):
+                    if (symbol_info.get('status') == 'TRADING' and
+                        symbol_info.get('quoteAsset') == quote_asset and
+                        symbol_info['symbol'] not in exclude_symbols):
+                        all_symbols.append(symbol_info['symbol'])
+
+                logger.info(f"[{self.name}] 找到 {len(all_symbols)} 个 {quote_asset} 交易对（未过滤）")
+
+                # 第二阶段：如果配置了成交量过滤，获取24hr ticker数据进行过滤
+                if min_volume:
+                    logger.info(f"[{self.name}] 正在获取24hr ticker数据进行成交量过滤...")
+
+                    # 批量获取ticker数据
+                    tickers = await client.get_ticker()
+
+                    # 创建ticker字典方便查找
+                    ticker_dict = {t['symbol']: t for t in tickers}
+
+                    # 过滤低成交量交易对
+                    filtered_symbols = []
+                    for symbol in all_symbols:
+                        ticker = ticker_dict.get(symbol, {})
+                        quote_volume = float(ticker.get('quoteVolume', 0))
+
+                        if quote_volume >= min_volume:
+                            filtered_symbols.append(symbol)
+
+                    logger.info(f"[{self.name}] ✅ 成交量过滤后剩余 {len(filtered_symbols)} 个交易对")
+                    all_symbols = filtered_symbols
+
+                # 第三阶段：价格过滤（如果需要）
+                if min_price is not None or max_price is not None:
+                    # 需要获取当前价格进行过滤
+                    logger.info(f"[{self.name}] 正在进行价格过滤...")
+
+                    # 重新获取ticker数据（如果之前没有获取）
+                    if not min_volume:
+                        tickers = await client.get_ticker()
+                        ticker_dict = {t['symbol']: t for t in tickers}
+                    else:
+                        ticker_dict = {t['symbol']: t for t in tickers}
+
+                    filtered_symbols = []
+                    for symbol in all_symbols:
+                        ticker = ticker_dict.get(symbol, {})
+                        current_price = float(ticker.get('lastPrice', 0))
+
+                        # 价格范围检查
+                        if min_price is not None and current_price < min_price:
+                            continue
+                        if max_price is not None and current_price > max_price:
+                            continue
+
+                        filtered_symbols.append(symbol)
+
+                    logger.info(f"[{self.name}] ✅ 价格过滤后剩余 {len(filtered_symbols)} 个交易对")
+                    all_symbols = filtered_symbols
+
+                logger.info(f"[{self.name}] ✅ 最终订阅 {len(all_symbols)} 个 {quote_asset} 交易对")
+                return all_symbols
+
+            finally:
+                await client.close()
+
+        except Exception as e:
+            logger.error(f"[{self.name}] 获取全市场交易对失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # 失败时返回空列表
+            return []
+
     async def initialize(self, initial_balance: float = 10000.0):
         """
         异步初始化策略（与HighFrequencyBreakoutStrategy接口一致）
@@ -168,6 +296,49 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         """
         self.initial_balance = initial_balance
         self.current_balance = initial_balance
+
+        # ✅ 全市场订阅：自动获取交易对
+        if self.auto_fetch_symbols:
+            logger.info(f"[{self.name}] 检测到全市场订阅模式，正在获取交易对...")
+            symbols = await self._fetch_all_market_symbols()
+
+            if not symbols:
+                logger.error(f"[{self.name}] ❌ 未能获取任何交易对，策略无法运行")
+                raise ValueError("全市场订阅失败：未能获取任何交易对")
+
+            # 更新交易对列表
+            self.binance_symbols = symbols
+            self.symbols = [s.replace('USDT', '-USDT') for s in symbols]
+
+            logger.info(f"[{self.name}] ✅ 全市场订阅初始化完成，共 {len(symbols)} 个交易对")
+
+            # 🔥 重要：需要重新创建依赖 self.binance_symbols 的组件
+            # 这些组件在 __init__ 中使用的是 ['AUTO'] 占位符
+            if not self.is_backtest:
+                from core.strategy.unified_data_provider import create_data_provider
+                from core.strategy.multi_timeframe_subscriber import MultiTimeframeKlineSubscriber
+
+                mode = self.config.get('mode', 'paper')
+
+                # 重新创建数据提供者
+                self.data_provider = create_data_provider(
+                    mode=mode,
+                    symbols=self.binance_symbols,
+                    timeframes=['1s', '15m', '1h']
+                )
+
+                # 重新创建订阅管理器
+                self.mt_subscriber = MultiTimeframeKlineSubscriber(
+                    symbols=self.binance_symbols,
+                    timeframes=['1s', '15m', '1h'],
+                    config={
+                        'max_reconnect_attempts': 5,
+                        'reconnect_delay_ms': 1000,
+                        'enable_stats': True
+                    }
+                )
+
+                logger.info(f"[{self.name}] ✅ 组件已使用实际交易对列表重新初始化")
 
         logger.info(f"[{self.name}] 策略异步初始化完成")
         logger.info(f"[{self.name}] 初始余额: {initial_balance} USDT")
