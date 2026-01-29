@@ -393,16 +393,16 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 )
 
                 # 15m K线处理器（指标更新）
-                self.mt_subscriber.register_handler(
-                    '15m',
-                    lambda msg: self.processor_router.process_higher_tf_kline(msg, '15m')
-                )
+                async def handle_15m_kline(msg):
+                    await self.processor_router.process_higher_tf_kline(msg, '15m')
+
+                self.mt_subscriber.register_handler('15m', handle_15m_kline)
 
                 # 1h K线处理器（指标更新）
-                self.mt_subscriber.register_handler(
-                    '1h',
-                    lambda msg: self.processor_router.process_higher_tf_kline(msg, '1h')
-                )
+                async def handle_1h_kline(msg):
+                    await self.processor_router.process_higher_tf_kline(msg, '1h')
+
+                self.mt_subscriber.register_handler('1h', handle_1h_kline)
 
                 # ==================== 启动所有订阅 ====================
                 await self.mt_subscriber.start_all_subscriptions(api_key, api_secret)
