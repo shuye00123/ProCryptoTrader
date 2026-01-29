@@ -1,17 +1,23 @@
 """
-基于1秒K线数据的量价突破检测器
+基于1秒K线数据的快速突破检测器 (Layer 1)
+
+重新设计：纯粹的1s K线快速检测，不依赖更高时间框架数据
 
 核心逻辑：
-- 量能分析：1秒K线成交量 vs 更高时间框架(15m/1h)平均成交量
-- 价格突破：1秒K线价格 vs 更高时间框架(15m/1h)布林带上/下沿
-- 支撑阻力：1秒K线价格 vs 更高时间框架(15m/1h)关键支撑/阻力位
-- 综合判断：放量 + 突破 = 信号
+- 成交量激增检测：1s成交量 vs 历史1s平均成交量
+- 价格动量检测：价格变化率和加速度
+- 连续变动检测：连续同向价格变动
+- 价格路径突破：基于1s数据的局部支撑阻力
+
+注意：这是Layer 1检测器，只负责生成初步信号。
+      多时间框架技术指标确认由Layer 2 (MultiTimeframeConfirmator) 负责。
 """
 
 import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
+from collections import deque
 import pandas as pd
 import numpy as np
 
@@ -42,49 +48,65 @@ class Kline:
 
 class KlineBreakoutDetector:
     """
-    基于1秒K线的量价突破检测器
+    基于1秒K线的快速突破检测器 (Layer 1)
+
+    重新设计：纯粹的1s快速检测，不依赖更高时间框架数据
 
     核心特性：
-    - 量能分析：检测成交量异常放大
-    - 价格突破：检测突破更高时间框架的关键位
-    - 支撑阻力：检测突破支撑/阻力位
+    - 成交量激增：检测异常放量
+    - 价格动量：检测价格加速度
+    - 连续变动：检测连续同向变动
+    - 路径突破：检测局部支撑阻力
     """
 
     def __init__(self, config: Dict):
         """
-        初始化1秒K线量价突破检测器
+        初始化1秒K线快速突破检测器
 
         Args:
             config: 配置字典
                 - volume_surge_threshold: 成交量激增阈值（默认3.0x）
                 - volume_window: 成交量平均窗口（默认50条）
-                - bb_breakout_threshold: 布林带突破阈值（默认突破到带外0.2%）
-                - support_resistance_window: 支撑阻力计算窗口（默认100条）
-                - min_signal_strength: 最小信号强度（默认0.7）
+                - momentum_threshold: 价格动量阈值（默认0.05%）
+                - momentum_window: 动量计算窗口（默认10条）
+                - consecutive_moves_threshold: 连续变动次数（默认5次）
+                - path_window: 路径检测窗口（默认20条）
+                - min_signal_strength: 最小信号强度（默认0.6）
         """
-        # 量能分析参数
+        # 成交量分析参数
         self.volume_surge_threshold = config.get('volume_surge_threshold', 3.0)  # 3倍成交量
         self.volume_window = config.get('volume_window', 50)  # 50条K线平均
 
-        # 价格突破参数
-        self.bb_breakout_threshold = config.get('bb_breakout_threshold', 0.002)  # 0.2%突破缓冲
-        self.bb_period = config.get('bb_period', 20)  # 布林带周期
-        self.bb_std = config.get('bb_std', 2.0)  # 布林带标准差倍数
+        # 价格动量参数
+        self.momentum_threshold = config.get('momentum_threshold', 0.0005)  # 0.05%价格变化
+        self.momentum_window = config.get('momentum_window', 10)  # 10条K线动量
 
-        # 支撑阻力参数
-        self.support_resistance_window = config.get('support_resistance_window', 100)
-        self.sr_touch_threshold = config.get('sr_touch_threshold', 0.001)  # 0.1%接触阈值
+        # 连续变动参数
+        self.consecutive_moves_threshold = config.get('consecutive_moves_threshold', 5)
+        self.min_move_threshold = config.get('min_move_threshold', 0.0001)  # 0.01%最小变动
+
+        # 路径突破参数
+        self.path_window = config.get('path_window', 20)
+        self.path_breakout_threshold = config.get('path_breakout_threshold', 0.0002)  # 0.02%
 
         # 信号强度参数
-        self.min_signal_strength = config.get('min_signal_strength', 0.7)
+        self.min_signal_strength = config.get('min_signal_strength', 0.6)
 
         # 历史数据缓冲（用于计算指标）
-        self.kline_history: Dict[str, list] = {}
+        self.window_size = max(
+            self.volume_window,
+            self.momentum_window,
+            self.consecutive_moves_threshold + 1,
+            self.path_window
+        )
+        self.kline_history: Dict[str, deque] = {}
 
-        logger.info(f"[KlineBreakoutDetector] 量价突破检测器初始化完成")
+        logger.info(f"[KlineBreakoutDetector] 1s快速突破检测器初始化完成")
+        logger.info(f"  职责: Layer 1 - 纯粹的1s K线快速检测")
         logger.info(f"  成交量阈值: {self.volume_surge_threshold}x")
-        logger.info(f"  布林带参数: {self.bb_period}周期, {self.bb_std}倍标准差")
-        logger.info(f"  支撑阻力窗口: {self.support_resistance_window}")
+        logger.info(f"  动量阈值: {self.momentum_threshold*100:.3f}%")
+        logger.info(f"  连续变动: {self.consecutive_moves_threshold}次")
+        logger.info(f"  路径窗口: {self.path_window}条")
 
     def detect_breakout(
         self,
@@ -93,387 +115,344 @@ class KlineBreakoutDetector:
         higher_timeframe_data: Optional[Dict[str, pd.DataFrame]] = None
     ) -> Optional[Signal]:
         """
-        检测1秒K线量价突破
+        检测1秒K线快速突破 (Layer 1)
+
+        ⚠️ 重要：此方法不再使用higher_timeframe_data参数（保留仅为兼容性）
+                  更高时间框架的技术指标确认由Layer 2负责
 
         Args:
             kline: 1秒K线数据
             symbol: 交易对符号
-            higher_timeframe_data: 更高时间框架的数据
-                {
-                    '15m': DataFrame with OHLCV,
-                    '1h': DataFrame with OHLCV
-                }
+            higher_timeframe_data: ⚠️ 已废弃，不再使用（保留仅为兼容性）
 
         Returns:
-            Signal: 突破信号（如果检测到突破），否则None
+            Signal: 初步突破信号（如果检测到突破），否则None
         """
         try:
             # 更新K线历史
             self._update_kline_history(kline, symbol)
 
             # 检查是否有足够数据
-            if len(self.kline_history.get(symbol, [])) < self.volume_window:
+            history = self.kline_history.get(symbol)
+            if not history or len(history) < self.momentum_window:
                 return None
 
-            # 计算量能指标
-            volume_analysis = self._analyze_volume_surge(kline, symbol)
+            # === Layer 1检测：纯粹的1s K线分析 ===
 
-            # 计算价格突破（使用更高时间框架数据）
-            price_breakout = self._analyze_price_breakout(
-                kline, symbol, higher_timeframe_data
+            # 1. 成交量激增检测（权重30%）
+            volume_score = self._detect_volume_surge(kline, symbol)
+
+            # 2. 价格动量检测（权重30%）
+            momentum_score = self._detect_price_momentum(kline, symbol)
+
+            # 3. 连续变动检测（权重20%）
+            consecutive_score = self._detect_consecutive_moves(kline, symbol)
+
+            # 4. 路径突破检测（权重20%）
+            path_score = self._detect_path_breakout(kline, symbol)
+
+            # 综合评分
+            signal_strength = (
+                volume_score * 0.30 +
+                momentum_score * 0.30 +
+                consecutive_score * 0.20 +
+                path_score * 0.20
             )
 
-            # 综合判断
-            signal_strength = 0.0
-            breakout_reasons = []
+            # 收集检测详情
+            detection_details = {
+                'volume_score': volume_score,
+                'momentum_score': momentum_score,
+                'consecutive_score': consecutive_score,
+                'path_score': path_score,
+                'total_strength': signal_strength
+            }
 
-            # 1. 量能分析（权重40%）
-            if volume_analysis['is_surge']:
-                signal_strength += 0.4
-                breakout_reasons.append(
-                    f"成交量激增{volume_analysis['volume_ratio']:.2f}x"
-                )
+            # 判断是否生成初步信号
+            if signal_strength >= self.min_signal_strength:
+                # 至少有2个检测方法得分>0.5
+                strong_detections = sum([
+                    volume_score > 0.5,
+                    momentum_score > 0.5,
+                    consecutive_score > 0.5,
+                    path_score > 0.5
+                ])
 
-            # 2. 布林带突破（权重35%）
-            if price_breakout['bb_breakout']:
-                signal_strength += 0.35
-                breakout_reasons.append(
-                    f"突破{price_breakout['bb_timeframe']}布林带"
-                    f"({price_breakout['bb_position']})"
-                )
-
-            # 3. 支撑阻力突破（权重25%）
-            if price_breakout['sr_breakout']:
-                signal_strength += 0.25
-                breakout_reasons.append(
-                    f"突破{price_breakout['sr_type']}"
-                    f"({price_breakout['sr_level']:.6f})"
-                )
-
-            # 判断是否生成信号
-            if signal_strength >= self.min_signal_strength and len(breakout_reasons) >= 2:
-                return self._create_signal(
-                    kline, symbol, signal_strength, breakout_reasons,
-                    volume_analysis, price_breakout
-                )
+                if strong_detections >= 2:
+                    return self._create_preliminary_signal(
+                        kline, symbol, signal_strength, detection_details
+                    )
 
             return None
 
         except Exception as e:
-            logger.error(f"检测突破时发生错误: {e}")
+            logger.error(f"[{symbol}] Layer 1检测失败: {e}")
             return None
 
     def _update_kline_history(self, kline: Kline, symbol: str):
         """更新K线历史数据"""
         if symbol not in self.kline_history:
-            self.kline_history[symbol] = []
+            self.kline_history[symbol] = deque(maxlen=self.window_size)
 
         self.kline_history[symbol].append(kline)
 
-        # 保持历史长度在合理范围（最多1000条）
-        if len(self.kline_history[symbol]) > 1000:
-            self.kline_history[symbol] = self.kline_history[symbol][-1000:]
-
-    def _analyze_volume_surge(self, kline: Kline, symbol: str) -> Dict:
+    def _detect_volume_surge(self, kline: Kline, symbol: str) -> float:
         """
-        分析成交量激增
-
-        ✅ 修复：直接使用volume字段（真实1秒K线成交量）
-
-        Args:
-            kline: 1秒K线
-            symbol: 交易对符号
+        检测成交量激增
 
         Returns:
-            {
-                'is_surge': bool,
-                'volume_ratio': float,
-                'current_volume': float,
-                'avg_volume': float
-            }
+            评分 [0, 1]
         """
         try:
-            klines = self.kline_history[symbol]
+            history = self.kline_history.get(symbol)
+            if not history or len(history) < self.volume_window:
+                return 0.0
 
-            # ✅ 直接使用volume字段（真实1秒K线成交量）
-            recent_volumes = [k.volume for k in klines[-self.volume_window:]]
-            avg_volume = np.mean(recent_volumes) if recent_volumes else 0
+            # 计算历史平均成交量
+            recent_volumes = [k.volume for k in list(history)[-self.volume_window:]]
+            avg_volume = np.mean(recent_volumes)
 
-            # 当前成交量（直接使用volume字段）
-            current_vol = kline.volume
+            if avg_volume == 0:
+                return 0.0
 
-            if avg_volume > 0:
-                volume_ratio = current_vol / avg_volume
+            # 当前成交量倍数
+            volume_ratio = kline.volume / avg_volume
+
+            # 评分：使用sigmoid函数平滑
+            if volume_ratio >= self.volume_surge_threshold:
+                # 3倍以上 = 1.0分
+                score = 1.0
+            elif volume_ratio >= self.volume_surge_threshold * 0.5:
+                # 1.5倍以上 = 0.5分
+                score = 0.5
             else:
-                volume_ratio = 1.0
+                # 低于1.5倍 = 0分
+                score = 0.0
 
-            # ✅ 使用3.0x阈值（经过验证的最优参数）
-            is_surge = volume_ratio >= 3.0
+            if score > 0:
+                logger.debug(f"[{symbol}] 成交量激增: {volume_ratio:.2f}x (评分:{score:.2f})")
 
-            return {
-                'is_surge': is_surge,
-                'volume_ratio': volume_ratio,
-                'current_volume': current_vol,
-                'avg_volume': avg_volume
-            }
+            return score
 
         except Exception as e:
-            logger.error(f"分析成交量时出错: {e}")
-            return {
-                'is_surge': False,
-                'volume_ratio': 0.0,
-                'current_volume': 0.0,
-                'avg_volume': 0.0
-            }
+            logger.error(f"[{symbol}] 成交量检测失败: {e}")
+            return 0.0
 
-    def _analyze_price_breakout(
-        self,
-        kline: Kline,
-        symbol: str,
-        higher_tf_data: Optional[Dict[str, pd.DataFrame]]
-    ) -> Dict:
+    def _detect_price_momentum(self, kline: Kline, symbol: str) -> float:
         """
-        分析价格突破（布林带、支撑阻力）
+        检测价格动量
 
-        Args:
-            kline: 1秒K线
-            symbol: 交易对符号
-            higher_tf_data: 更高时间框架数据
+        计算短期动量和加速度
 
         Returns:
-            {
-                'bb_breakout': bool,
-                'bb_timeframe': str ('15m', '1h', or '1s'),
-                'bb_position': str ('upper', 'lower', or None),
-                'sr_breakout': bool,
-                'sr_type': str ('resistance' or 'support'),
-                'sr_level': float
-            }
+            评分 [0, 1]
         """
-        result = {
-            'bb_breakout': False,
-            'bb_timeframe': None,
-            'bb_position': None,
-            'sr_breakout': False,
-            'sr_type': None,
-            'sr_level': None
-        }
-
         try:
-            # 优先使用更高时间框架数据
-            if higher_tf_data:
-                # 检查15m布林带突破
-                if '15m' in higher_tf_data:
-                    bb_15m = self._check_bb_breakout(
-                        kline, higher_tf_data['15m'], '15m'
-                    )
-                    if bb_15m['is_breakout']:
-                        result['bb_breakout'] = True
-                        result['bb_timeframe'] = '15m'
-                        result['bb_position'] = bb_15m['position']
-                        logger.debug(f"[{symbol}] 检测到15m布林带突破: {bb_15m}")
+            history = self.kline_history.get(symbol)
+            if not history or len(history) < self.momentum_window:
+                return 0.0
 
-                # 如果15m没有突破，检查1h
-                if not result['bb_breakout'] and '1h' in higher_tf_data:
-                    bb_1h = self._check_bb_breakout(
-                        kline, higher_tf_data['1h'], '1h'
-                    )
-                    if bb_1h['is_breakout']:
-                        result['bb_breakout'] = True
-                        result['bb_timeframe'] = '1h'
-                        result['bb_position'] = bb_1h['position']
-                        logger.debug(f"[{symbol}] 检测到1h布林带突破: {bb_1h}")
+            # 转换为列表
+            klines = list(history)
 
-                # 检查支撑阻力位突破
-                if '15m' in higher_tf_data:
-                    sr_15m = self._check_sr_breakout(
-                        kline, higher_tf_data['15m']
-                    )
-                    if sr_15m['is_breakout']:
-                        result['sr_breakout'] = True
-                        result['sr_type'] = sr_15m['type']
-                        result['sr_level'] = sr_15m['level']
-                        logger.debug(f"[{symbol}] 检测到15m支撑阻力突破: {sr_15m}")
+            # 计算短期价格变化
+            if len(klines) >= 3:
+                # 1期变化
+                change_1 = (klines[-1].close - klines[-2].close) / klines[-2].close
 
-            # 如果没有更高时间框架数据，使用1s历史数据计算
-            if not result['bb_breakout'] and symbol in self.kline_history:
-                klines = self.kline_history[symbol]
-                if len(klines) >= self.bb_period:
-                    # 构建1s数据的DataFrame
-                    df_1s = pd.DataFrame([
-                        {
-                            'open': k.open,
-                            'high': k.high,
-                            'low': k.low,
-                            'close': k.close,
-                            'volume': k.volume
-                        }
-                        for k in klines
-                    ])
+                # 3期平均变化（动量）
+                change_3 = (klines[-1].close - klines[-4].close) / klines[-4].close if len(klines) >= 4 else change_1
 
-                    bb_1s = self._check_bb_breakout(kline, df_1s, '1s')
-                    if bb_1s['is_breakout']:
-                        result['bb_breakout'] = True
-                        result['bb_timeframe'] = '1s'
-                        result['bb_position'] = bb_1s['position']
-                        logger.debug(f"[{symbol}] 检测到1s布林带突破: {bb_1s}")
+                # 加速度（动量的变化）
+                if len(klines) >= 8:
+                    momentum_1 = (klines[-4].close - klines[-5].close) / klines[-5].close
+                    momentum_2 = (klines[-1].close - klines[-4].close) / klines[-4].close
+                    acceleration = momentum_2 - momentum_1
+                else:
+                    acceleration = 0
+
+                # 评分逻辑
+                score = 0.0
+
+                # 大幅价格变化
+                if abs(change_1) > self.momentum_threshold:
+                    score += 0.3
+
+                # 动量方向一致
+                if (change_1 > 0 and change_3 > 0) or (change_1 < 0 and change_3 < 0):
+                    score += 0.3
+
+                # 加速度支持
+                if (change_1 > 0 and acceleration > 0) or (change_1 < 0 and acceleration < 0):
+                    score += 0.4
+
+                score = min(score, 1.0)
+
+                if score > 0.5:
+                    logger.debug(f"[{symbol}] 价格动量: 变化={change_1*100:.3f}%, "
+                               f"动量={change_3*100:.3f}%, 加速={acceleration*100:.3f}% "
+                               f"(评分:{score:.2f})")
+
+                return score
+
+            return 0.0
 
         except Exception as e:
-            logger.error(f"分析价格突破时出错: {e}")
+            logger.error(f"[{symbol}] 动量检测失败: {e}")
+            return 0.0
 
-        return result
-
-    def _check_bb_breakout(
-        self,
-        kline: Kline,
-        df: pd.DataFrame,
-        timeframe: str
-    ) -> Dict:
+    def _detect_consecutive_moves(self, kline: Kline, symbol: str) -> float:
         """
-        检查布林带突破
-
-        Args:
-            kline: 1秒K线
-            df: 更高时间框架的K线数据
-            timeframe: 时间框架标识
+        检测连续同向价格变动
 
         Returns:
-            {
-                'is_breakout': bool,
-                'position': str ('upper' or 'lower'),
-                'upper': float,
-                'lower': float,
-                'close': float
-            }
+            评分 [0, 1]
         """
         try:
-            if len(df) < self.bb_period:
-                return {'is_breakout': False}
+            history = self.kline_history.get(symbol)
+            if not history or len(history) < self.consecutive_moves_threshold + 1:
+                return 0.0
 
-            # 计算布林带
-            close = df['close']
-            bb_middle = close.rolling(window=self.bb_period).mean()
-            bb_std = close.rolling(window=self.bb_period).std()
-            bb_upper = bb_middle + self.bb_std * bb_std
-            bb_lower = bb_middle - self.bb_std * bb_std
+            klines = list(history)
 
-            upper = bb_upper.iloc[-1]
-            lower = bb_lower.iloc[-1]
-            current_price = kline.close
+            # 统计连续同向变动次数
+            consecutive_up = 0
+            consecutive_down = 0
 
-            # 检查是否突破上轨
-            if current_price > upper * (1 + self.bb_breakout_threshold):
-                return {
-                    'is_breakout': True,
-                    'position': 'upper',
-                    'upper': upper,
-                    'lower': lower,
-                    'close': current_price
-                }
+            for i in range(len(klines) - 1, -1, -1):
+                change = klines[i].close - klines[i].open
 
-            # 检查是否突破下轨
-            if current_price < lower * (1 - self.bb_breakout_threshold):
-                return {
-                    'is_breakout': True,
-                    'position': 'lower',
-                    'upper': upper,
-                    'lower': lower,
-                    'close': current_price
-                }
+                if change > 0 and self.min_move_threshold > 0:
+                    if change / klines[i].open > self.min_move_threshold:
+                        consecutive_up += 1
+                        consecutive_down = 0
+                    else:
+                        break
+                elif change < 0 and self.min_move_threshold > 0:
+                    if abs(change) / klines[i].open > self.min_move_threshold:
+                        consecutive_down += 1
+                        consecutive_up = 0
+                    else:
+                        break
+                else:
+                    break
 
-            return {'is_breakout': False}
+            consecutive_moves = max(consecutive_up, consecutive_down)
+
+            # 评分
+            if consecutive_moves >= self.consecutive_moves_threshold:
+                # 达到阈值 = 1.0分
+                score = 1.0
+            elif consecutive_moves >= self.consecutive_moves_threshold * 0.6:
+                # 达到60%阈值 = 0.5分
+                score = 0.5
+            else:
+                score = 0.0
+
+            if score > 0:
+                logger.debug(f"[{symbol}] 连续变动: {consecutive_moves}次 "
+                           f"{'向上' if consecutive_up > consecutive_down else '向下'} "
+                           f"(评分:{score:.2f})")
+
+            return score
 
         except Exception as e:
-            logger.error(f"检查布林带突破时出错: {e}")
-            return {'is_breakout': False}
+            logger.error(f"[{symbol}] 连续变动检测失败: {e}")
+            return 0.0
 
-    def _check_sr_breakout(self, kline: Kline, df: pd.DataFrame) -> Dict:
+    def _detect_path_breakout(self, kline: Kline, symbol: str) -> float:
         """
-        检查支撑阻力位突破
+        检测价格路径突破（局部支撑阻力）
 
-        Args:
-            kline: 1秒K线
-            df: 更高时间框架的K线数据
+        基于最近N条1s K线检测局部支撑阻力位突破
 
         Returns:
-            {
-                'is_breakout': bool,
-                'type': str ('resistance' or 'support'),
-                'level': float
-            }
+            评分 [0, 1]
         """
         try:
-            window = min(len(df), self.support_resistance_window)
-            if window < 20:
-                return {'is_breakout': False}
+            history = self.kline_history.get(symbol)
+            if not history or len(history) < self.path_window:
+                return 0.0
 
-            # 计算关键支撑阻力位
-            recent_highs = df['high'].iloc[-window:].max()
-            recent_lows = df['low'].iloc[-window:].min()
+            klines = list(history)[-self.path_window:]
+
+            # 计算局部高低点
+            highs = [k.high for k in klines]
+            lows = [k.low for k in klines]
+
+            local_high = max(highs[:-1]) if len(highs) > 1 else klines[-1].high
+            local_low = min(lows[:-1]) if len(lows) > 1 else klines[-1].low
 
             current_price = kline.close
 
-            # 检查阻力位突破
-            if current_price > recent_highs * (1 + self.sr_touch_threshold):
-                return {
-                    'is_breakout': True,
-                    'type': 'resistance',
-                    'level': recent_highs
-                }
+            score = 0.0
 
-            # 检查支撑位突破
-            if current_price < recent_lows * (1 - self.sr_touch_threshold):
-                return {
-                    'is_breakout': True,
-                    'type': 'support',
-                    'level': recent_lows
-                }
+            # 突破局部高点
+            if current_price > local_high * (1 + self.path_breakout_threshold):
+                score = 1.0
+                logger.debug(f"[{symbol}] 路径突破: 突破局部高点 {local_high:.6f}")
 
-            return {'is_breakout': False}
+            # 突破局部低点
+            elif current_price < local_low * (1 - self.path_breakout_threshold):
+                score = 1.0
+                logger.debug(f"[{symbol}] 路径突破: 突破局部低点 {local_low:.6f}")
+
+            # 接近关键位（0.5分）
+            elif abs(current_price - local_high) / local_high < self.path_breakout_threshold * 5:
+                score = 0.5
+            elif abs(current_price - local_low) / local_low < self.path_breakout_threshold * 5:
+                score = 0.5
+
+            return score
 
         except Exception as e:
-            logger.error(f"检查支撑阻力突破时出错: {e}")
-            return {'is_breakout': False}
+            logger.error(f"[{symbol}] 路径突破检测失败: {e}")
+            return 0.0
 
-    def _create_signal(
+    def _create_preliminary_signal(
         self,
         kline: Kline,
         symbol: str,
         strength: float,
-        reasons: List[str],
-        volume_analysis: Dict,
-        price_breakout: Dict
+        details: Dict
     ) -> Signal:
-        """创建突破信号"""
+        """
+        创建初步突破信号 (Layer 1)
 
-        # 确定方向
-        if price_breakout.get('bb_position') == 'upper':
+        Args:
+            kline: 1秒K线
+            symbol: 交易对
+            strength: 信号强度
+            details: 检测详情
+
+        Returns:
+            Signal: 初步信号
+        """
+        # 确定方向（基于价格变化）
+        if kline.price_change > 0:
             signal_type = SignalType.OPEN_LONG
             direction = "BUY"
-        elif price_breakout.get('bb_position') == 'lower':
-            signal_type = SignalType.OPEN_SHORT
-            direction = "SELL"
-        elif price_breakout.get('sr_type') == 'resistance':
-            signal_type = SignalType.OPEN_LONG
-            direction = "BUY"
-        elif price_breakout.get('sr_type') == 'support':
-            signal_type = SignalType.OPEN_SHORT
-            direction = "SELL"
         else:
-            # 默认根据价格变化判断
-            if kline.price_change > 0:
-                signal_type = SignalType.OPEN_LONG
-                direction = "BUY"
-            else:
-                signal_type = SignalType.OPEN_SHORT
-                direction = "SELL"
+            signal_type = SignalType.OPEN_SHORT
+            direction = "SELL"
 
-        reason = f"1s K线量价突破: {', '.join(reasons)}, 强度={strength:.2f}"
+        # 构建原因描述
+        reasons = []
+        if details['volume_score'] > 0.5:
+            reasons.append("成交量激增")
+        if details['momentum_score'] > 0.5:
+            reasons.append("价格动量")
+        if details['consecutive_score'] > 0.5:
+            reasons.append("连续变动")
+        if details['path_score'] > 0.5:
+            reasons.append("路径突破")
 
-        logger.info(f"[{symbol}] ⚡ 量价突破信号: {direction}, "
+        reason = f"Layer 1快速突破: {', '.join(reasons)}, 强度={strength:.2f}"
+
+        logger.info(f"[{symbol}] ⚡ Layer 1初步信号: {direction}, "
                    f"强度={strength:.2f}, "
                    f"价格={kline.close:.6f}, "
-                   f"成交量={volume_analysis['volume_ratio']:.2f}x")
+                   f"变化={kline.price_change_pct:.3f}%")
 
         return Signal(
             signal_type=signal_type,
@@ -483,6 +462,7 @@ class KlineBreakoutDetector:
             confidence=strength,
             metadata={
                 'reason': reason,
+                'layer': 'layer1',
                 'kline_timestamp': kline.timestamp.isoformat(),
                 'open': kline.open,
                 'high': kline.high,
@@ -490,23 +470,23 @@ class KlineBreakoutDetector:
                 'close': kline.close,
                 'volume': kline.volume,
                 'price_change_pct': kline.price_change_pct,
-                'volume_analysis': volume_analysis,
-                'price_breakout': price_breakout,
-                'strength': strength
+                'detection_details': details
             }
         )
 
     def get_detector_status(self, symbol: str) -> Dict[str, Any]:
         """获取检测器状态（用于监控）"""
-        if symbol not in self.kline_history:
+        history = self.kline_history.get(symbol)
+
+        if not history:
             return {
                 'symbol': symbol,
-                'window_size': self.volume_window,
+                'window_size': self.window_size,
                 'current_size': 0,
                 'ready': False
             }
 
-        klines = self.kline_history[symbol]
+        klines = list(history)
 
         # 计算当前统计信息
         volumes = [k.volume for k in klines]
@@ -514,12 +494,13 @@ class KlineBreakoutDetector:
 
         return {
             'symbol': symbol,
-            'window_size': self.volume_window,
+            'window_size': self.window_size,
             'current_size': len(klines),
-            'ready': len(klines) >= self.volume_window,
+            'ready': len(klines) >= self.momentum_window,
             'latest_price': klines[-1].close if klines else None,
             'price_mean': np.mean(closes) if closes else None,
             'price_std': np.std(closes) if len(closes) > 1 else None,
             'volume_mean': np.mean(volumes) if volumes else None,
-            'latest_volume': klines[-1].volume if klines else None
+            'latest_volume': klines[-1].volume if klines else None,
+            'layer': 'layer1_fast_detection'
         }

@@ -82,8 +82,20 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
         logger.info(f"[{self.name}] 1秒K线突破检测器初始化完成")
 
-        # ==================== 多时间框架确认器（Phase 2实现） ====================
-        # self.mt_confirmator = None  # Phase 2: MultiTimeframeConfirmator
+        # ==================== 多时间框架确认器（Layer 2） ====================
+        mt_confirmator_config = config.get('strategy', {}).get('multi_timeframe', {})
+        self.mt_confirmator = None  # 将在非回测模式下初始化
+        self.enable_layer2_confirmation = mt_confirmator_config.get('enabled', True)
+
+        if not self.is_backtest and self.enable_layer2_confirmation:
+            from core.strategy.multi_timeframe_confirmator import MultiTimeframeConfirmator
+            self.mt_confirmator = MultiTimeframeConfirmator(
+                data_fetcher=None,  # 使用实时数据
+                config=mt_confirmator_config
+            )
+            logger.info(f"[{self.name}] ✅ Layer 2多时间框架确认器已启用")
+        else:
+            logger.info(f"[{self.name}] Layer 2确认器: {'禁用（回测模式）' if self.is_backtest else '未启用'}")
 
         # ==================== 1秒K线数据缓冲 ====================
         # 用于实时检测（symbol -> deque of klines）
@@ -494,35 +506,45 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                     # 准备更高时间框架数据
                     symbol_higher_tf_data = higher_timeframe_data.get(symbol, {}) if higher_timeframe_data else {}
 
-                    # === Layer 1: 1秒K线量价突破检测 ===
+                    # === Layer 1: 1秒K线快速突破检测 ===
                     preliminary_signal = self.kline_detector.detect_breakout(
                         kline,
                         binance_symbol,
-                        symbol_higher_tf_data  # 传递15m/1h数据用于布林带和支撑阻力检测
+                        None  # ⚠️ Layer 1不再使用更高时间框架数据
                     )
 
                     if preliminary_signal:
                         self.signal_stats['preliminary_signals'] += 1
 
-                        logger.info(f"[{symbol}] ⚡ 初步量价突破信号: {preliminary_signal.signal_type.value}, "
+                        logger.info(f"[{symbol}] ⚡ Layer 1初步信号: {preliminary_signal.signal_type.value}, "
                                    f"强度: {preliminary_signal.confidence:.2f}, "
-                                   f"价格: {kline.close:.6f}")
+                                   f"价格: {kline.close:.6f}, "
+                                   f"原因: {preliminary_signal.metadata.get('reason', 'N/A')}")
 
-                        # === Layer 2: 多时间框架技术指标确认（可选） ===
-                        # 由于Layer 1已经使用了更高时间框架的布林带和支撑阻力，
-                        # 这里的确认可以简化或省略
-                        confirmed_signal = self._confirm_with_indicators(preliminary_signal, symbol, binance_symbol)
+                        # === Layer 2: 多时间框架技术指标确认 ===
+                        if self.mt_confirmator and self.enable_layer2_confirmation:
+                            # 使用MultiTimeframeConfirmator进行确认
+                            confirmed_signal = await self.mt_confirmator.confirm_breakout(
+                                preliminary_signal,
+                                binance_symbol,
+                                symbol_higher_tf_data  # 传递15m/1h数据用于技术指标确认
+                            )
 
-                        if confirmed_signal:
-                            self.signal_stats['confirmed_signals'] += 1
+                            if confirmed_signal:
+                                self.signal_stats['confirmed_signals'] += 1
 
-                            logger.info(f"[{symbol}] ✅ 最终交易信号: {confirmed_signal.signal_type.value}, "
-                                       f"置信度: {confirmed_signal.confidence:.2f}, "
-                                       f"原因: {confirmed_signal.metadata.get('reason', 'N/A')}")
+                                logger.info(f"[{symbol}] ✅ Layer 2确认通过: {confirmed_signal.signal_type.value}, "
+                                           f"置信度: {preliminary_signal.confidence:.2f} → {confirmed_signal.confidence:.2f}, "
+                                           f"原因: {confirmed_signal.metadata.get('reason', 'N/A')}")
 
-                            signals.append(confirmed_signal)
+                                signals.append(confirmed_signal)
+                            else:
+                                logger.info(f"[{symbol}] ❌ Layer 2确认未通过")
                         else:
-                            logger.info(f"[{symbol}] ❌ 未通过技术指标确认")
+                            # Layer 2未启用，直接使用Layer 1信号（回测模式）
+                            self.signal_stats['confirmed_signals'] += 1
+                            logger.info(f"[{symbol}] ⚠️  使用Layer 1信号（Layer 2未启用）")
+                            signals.append(preliminary_signal)
 
             except Exception as e:
                 logger.error(f"[{symbol}] 处理K线数据时出错: {e}")
@@ -813,31 +835,57 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
             self.kline_1s_buffer[symbol].append(kline)
 
-            # === Layer 1: 1秒K线突破检测 ===
+            # === Layer 1: 1秒K线快速突破检测 ===
             preliminary_signal = self.kline_detector.detect_breakout(kline, symbol)
 
             if preliminary_signal:
                 self.signal_stats['preliminary_signals'] += 1
 
-                logger.info(f"[{symbol}] ⚡ 初步突破信号: {preliminary_signal.signal_type.value}, "
+                logger.info(f"[{symbol}] ⚡ Layer 1初步信号: {preliminary_signal.signal_type.value}, "
                            f"强度: {preliminary_signal.confidence:.2f}, "
-                           f"价格: {kline.close:.6f}")
+                           f"价格: {kline.close:.6f}, "
+                           f"原因: {preliminary_signal.metadata.get('reason', 'N/A')}")
 
-                # === Layer 2: 技术指标确认（简化版） ===
-                # Phase 2将使用MultiTimeframeConfirmator
-                confirmed_signal = await self._confirm_with_buffered_data(preliminary_signal, symbol)
+                # === Layer 2: 多时间框架技术指标确认 ===
+                if self.mt_confirmator and self.enable_layer2_confirmation:
+                    # 获取缓存的更高时间框架数据
+                    if hasattr(self, 'kline_history') and self.indicator_cache:
+                        # 收集更高时间框架数据
+                        symbol_higher_tf_data = {}
+                        for tf in ['15m', '1h']:
+                            if tf in self.kline_history and symbol in self.kline_history[tf]:
+                                # 转换deque为DataFrame
+                                history = list(self.kline_history[tf][symbol])
+                                if len(history) > 0:
+                                    df = self._deque_to_dataframe(history)
+                                    symbol_higher_tf_data[tf] = df
 
-                if confirmed_signal:
+                        # Layer 2确认
+                        confirmed_signal = await self.mt_confirmator.confirm_breakout(
+                            preliminary_signal,
+                            symbol,
+                            symbol_higher_tf_data
+                        )
+
+                        if confirmed_signal:
+                            self.signal_stats['confirmed_signals'] += 1
+
+                            logger.info(f"[{symbol}] ✅ Layer 2确认通过: {confirmed_signal.signal_type.value}, "
+                                       f"置信度: {preliminary_signal.confidence:.2f} → {confirmed_signal.confidence:.2f}")
+
+                            # 执行交易信号
+                            await self._execute_signal(confirmed_signal)
+                        else:
+                            logger.info(f"[{symbol}] ❌ Layer 2确认未通过")
+                    else:
+                        logger.warning(f"[{symbol}] Layer 2确认失败：缺少缓存数据")
+                else:
+                    # Layer 2未启用，直接使用Layer 1信号
                     self.signal_stats['confirmed_signals'] += 1
-
-                    logger.info(f"[{symbol}] ✅ 最终交易信号: {confirmed_signal.signal_type.value}, "
-                               f"置信度: {confirmed_signal.confidence:.2f}, "
-                               f"原因: {confirmed_signal.reason}")
+                    logger.info(f"[{symbol}] ⚠️  使用Layer 1信号（Layer 2未启用）")
 
                     # 执行交易信号
-                    await self._execute_signal(confirmed_signal)
-                else:
-                    logger.info(f"[{symbol}] ❌ 未通过技术指标确认")
+                    await self._execute_signal(preliminary_signal)
 
         except Exception as e:
             logger.error(f"[{kline.symbol}] 处理K线更新时出错: {e}")
@@ -848,10 +896,21 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
     def _confirm_with_indicators(self, preliminary: Signal, symbol: str, binance_symbol: str) -> Optional[Signal]:
         """
-        使用技术指标确认初步信号（同步版本，用于回测）
+        [已废弃] 使用技术指标确认初步信号（同步版本，用于回测）
 
-        注意：由于Layer 1（KlineBreakoutDetector）已经使用了15m/1h的布林带和支撑阻力
-        进行量价结合的确认，这里直接返回初步信号，避免重复确认和架构矛盾。
+        ⚠️ 重要架构变更：
+
+        新架构（两层确认）：
+        - Layer 1 (KlineBreakoutDetector): 纯粹的1s K线快速检测
+          - 成交量激增、价格动量、连续变动、路径突破
+          - 不依赖更高时间框架数据
+
+        - Layer 2 (MultiTimeframeConfirmator): 多时间框架技术指标确认
+          - 15m: SMA、布林带、RSI
+          - 1h: EMA、MACD、成交量趋势
+          - 1d: 趋势方向、关键位置（可选）
+
+        职责重新划分后，不再需要此方法（Layer 1和Layer 2职责清晰分离）。
 
         Args:
             preliminary: 初步突破信号
@@ -860,106 +919,15 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
         Returns:
             确认后的最终信号（直接返回初步信号）
+
+        Note:
+            此方法已废弃，保留仅为向后兼容。
+            实际确认逻辑已移至generate_signals()中的Layer 2。
         """
-        # Layer 1已经做了充分的量价结合确认：
-        # - 成交量激增检测（1s vs 历史）
-        # - 布林带突破检测（1s价格 vs 15m/1h BB）
-        # - 支撑阻力突破检测（1s价格 vs 15m/1h SR）
-        #
-        # 所以这里直接返回初步信号，不需要额外的技术指标确认
-        # 这避免了使用1s K线指标进行确认的架构矛盾
+        logger.debug(f"[{symbol}] _confirm_with_indicators已废弃，使用新的Layer 2确认逻辑")
 
-        logger.debug(f"[{symbol}] 跳过技术指标确认，Layer 1已充分确认")
-
-        # 直接返回初步信号，保留原有的元数据
-        # 获取原始原因
-        original_reason = preliminary.metadata.get('reason', "1s K线量价突破")
-
-        return Signal(
-            signal_type=preliminary.signal_type,
-            symbol=preliminary.symbol,
-            price=preliminary.price,
-            amount=preliminary.amount,
-            confidence=min(1.0, preliminary.confidence),  # 保持原置信度
-            metadata={
-                **preliminary.metadata,  # 保留Layer 1的详细元数据
-                'strategy': self.name,
-                'confirmation_method': 'layer1_only',  # 标记只使用了Layer 1确认
-                'reason': f"{original_reason}（Layer 1已确认）"  # 在metadata中添加原因说明
-            }
-        )
-
-    async def _confirm_with_buffered_data(self, preliminary: Signal, symbol: str) -> Optional[Signal]:
-        """
-        使用缓冲的K线数据进行确认（异步版本，用于实时）
-
-        Args:
-            preliminary: 初步突破信号
-            symbol: 交易对符号
-
-        Returns:
-            确认后的最终信号，如果未通过确认则返回None
-        """
-        # 检查缓冲区是否有足够数据
-        if symbol not in self.kline_1s_buffer:
-            return None
-
-        klines = list(self.kline_1s_buffer[symbol])
-        if len(klines) < 20:
-            return None
-
-        # 计算简单技术指标
-        confirmations = []
-
-        # 1. 短期趋势确认（最近5个K线）
-        if len(klines) >= 5:
-            recent_closes = [k.close for k in klines[-5:]]
-            if recent_closes[-1] > sum(recent_closes[:-1]) / (len(recent_closes) - 1):
-                confirmations.append({
-                    'timeframe': '1s',
-                    'indicator': 'SHORT_TREND',
-                    'value': 'UP'
-                })
-
-        # 2. 价格动量确认
-        if len(klines) >= 10:
-            momentum = (klines[-1].close - klines[-10].close) / klines[-10].close
-            if momentum > 0.002:  # 0.2%动量
-                confirmations.append({
-                    'timeframe': '1s',
-                    'indicator': 'MOMENTUM',
-                    'value': momentum
-                })
-
-        # 3. 成交量确认
-        if len(klines) >= 20:
-            volumes = [k.volume for k in klines]
-            avg_volume = sum(volumes) / len(volumes)
-            vol_ratio = klines[-1].volume / avg_volume if avg_volume > 0 else 1.0
-            if vol_ratio > 1.5:  # 成交量放大50%
-                confirmations.append({
-                    'timeframe': '1s',
-                    'indicator': 'VOLUME_SURGE',
-                    'value': vol_ratio
-                })
-
-        # 确认规则：至少需要2个确认
-        if len(confirmations) >= 2:
-            return Signal(
-                signal_type=preliminary.signal_type,
-                symbol=preliminary.symbol,
-                price=preliminary.price,
-                amount=preliminary.amount,
-                confidence=min(1.0, preliminary.confidence + 0.1),
-                metadata={
-                    'preliminary_signal': preliminary.to_dict(),
-                    'confirmations': confirmations,
-                    'reason': f"1s突破 + {len(confirmations)}个实时技术指标确认",
-                    'strategy': self.name
-                }
-            )
-
-        return None
+        # 直接返回初步信号
+        return preliminary
 
     # =========================================================================
     # 工具方法
