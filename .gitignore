@@ -1,0 +1,145 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# 虚拟环境
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# 日志文件
+*.log
+logs/
+error.log
+*.log.*
+*.log.gz
+
+# 数据文件
+data/binance/*
+data/tick/
+!data/binance/.gitkeep
+*.parquet
+*.csv
+*.h5
+*.hdf5
+*.feather
+*.pkl
+*.pickle
+
+# 测试和临时文件
+temp/
+tmp/
+*.tmp
+*.temp
+*.bak
+*.backup
+nul
+
+# 报告和结果（可选）
+results/
+.reports/
+*.html
+charts/
+figures/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# 环境变量和敏感配置
+.env
+.env.local
+.env.*.local
+*_secrets.yaml
+*_local.yaml
+secrets/
+credentials.yaml
+
+# 文档生成
+docs/_build/
+docs/.doctrees/
+site/
+
+# 性能分析
+.prof
+*.prof
+
+# 依赖管理
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 单元测试
+.pytest_cache/
+.testrepository/
+.test/cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# 临时调试脚本（不提交scripts/目录下的临时测试文件）
+scripts/test_*.py
+scripts/debug_*.py
+scripts/diagnose_*.py
+scripts/simple_*.py
+scripts/minimal_*.py
+scripts/verify_*.py
+scripts/analyze_*.py
+scripts/check_*.py
+scripts/final_*.py
+scripts/*_test*.py
+scripts/*.deprecated
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+
+# 其他
+.cache/
+*.pid
+*.seed
+*.pid.lock

@@ -68,6 +68,7 @@ class HighFrequencyTrader:
         self.strategy = None
         self.exchange = None
         self.execution_engine = None
+        self.webhook = None  # 🆕 Webhook通知工具
 
         # 运行统计
         self.start_time = None
@@ -195,6 +196,19 @@ class HighFrequencyTrader:
                 # 直接设置属性
                 self.strategy.execution_engine = self.execution_engine
 
+            # ==================== 🆕 6. 初始化Webhook通知 ====================
+            await self._initialize_webhook()
+
+            # 🆕 7. 将webhook传递给策略和执行引擎
+            if self.webhook:
+                if self.strategy and hasattr(self.strategy, 'webhook'):
+                    self.strategy.webhook = self.webhook
+                    logger.info("✅ Webhook已传递给策略")
+
+                if self.execution_engine and hasattr(self.execution_engine, 'webhook'):
+                    self.execution_engine.webhook = self.webhook
+                    logger.info("✅ Webhook已传递给执行引擎")
+
             logger.info("高频交易组件初始化完成")
             return True
 
@@ -263,12 +277,95 @@ class HighFrequencyTrader:
             logger.error(traceback.format_exc())
             return 1
 
+    async def _initialize_webhook(self):
+        """初始化Webhook通知"""
+        try:
+            notifications_config = self.config.get('notifications', {})
+
+            # 检查是否启用通知
+            if not notifications_config.get('enabled', False):
+                logger.info("ℹ️  Webhook通知已禁用（配置：notifications.enabled=false）")
+                return
+
+            webhook_url = notifications_config.get('webhook_url', '')
+            if not webhook_url:
+                logger.warning("⚠️  Webhook URL未配置，跳过webhook初始化")
+                return
+
+            # 导入webhook工具
+            from ..utils.webhook_util import WebhookUtil, WebhookConfig, WebhookPlatform
+
+            # 创建webhook配置
+            webhook_config = WebhookConfig(
+                url=webhook_url,
+                platform=WebhookPlatform.FEISHU,  # 默认使用飞书
+                enabled=True,
+                timeout=10,
+                retry_count=3,
+                enable_rate_limit=True,
+                max_requests_per_minute=30
+            )
+
+            # 创建并启动webhook
+            self.webhook = WebhookUtil(webhook_config)
+            await self.webhook.start()
+
+            logger.info(f"✅ Webhook通知已启用: {webhook_url[:50]}...")
+
+            # 发送系统启动通知
+            mode = self.config.get('basic', {}).get('mode', 'paper')
+            strategy_name = self.strategy.name if self.strategy else 'Unknown'
+
+            await self.webhook.send_alert(
+                title="🚀 高频交易系统启动",
+                message=f"""策略: {strategy_name}
+模式: {'实盘交易' if mode == 'live' else '模拟交易'}
+时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""",
+                level="INFO"
+            )
+            logger.info("✅ 系统启动通知已发送")
+
+        except Exception as e:
+            logger.error(f"❌ Webhook初始化失败: {e}")
+            logger.info("继续运行但不发送webhook通知")
+            self.webhook = None
+
     async def shutdown(self):
         """安全关闭高频交易"""
         logger.info("正在关闭高频交易...")
         self.is_running = False
 
         try:
+            # ==================== 🆕 关闭Webhook通知 ====================
+            if self.webhook:
+                try:
+                    # 发送系统关闭通知（包含运行统计）
+                    runtime_str = ""
+                    if self.start_time:
+                        runtime = (datetime.now() - self.start_time).total_seconds()
+                        hours = int(runtime // 3600)
+                        minutes = int((runtime % 3600) // 60)
+                        runtime_str = f"{hours}小时{minutes}分钟"
+
+                    stats_summary = f"""运行时长: {runtime_str}
+信号生成: {self.stats.get('signals_generated', 0)}
+信号执行: {self.stats.get('signals_executed', 0)}
+成功交易: {self.stats.get('successful_trades', 0)}
+失败交易: {self.stats.get('failed_trades', 0)}"""
+
+                    await self.webhook.send_alert(
+                        title="🛑 高频交易系统关闭",
+                        message=stats_summary,
+                        level="INFO"
+                    )
+
+                    # 停止webhook
+                    await self.webhook.stop()
+                    logger.info("✅ Webhook通知已关闭")
+                except Exception as webhook_error:
+                    logger.error(f"关闭webhook时出错: {webhook_error}")
+            # ====================================================================
+
             # 关闭策略
             if self.strategy:
                 await self.strategy.shutdown()

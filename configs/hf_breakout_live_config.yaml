@@ -325,15 +325,18 @@ logging:
 
 # 通知配置 (可选)
 notifications:
-  enabled: false
-  webhook_url: ""
+  enabled: true  # 🆕 启用webhook通知
+  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_WEBHOOK_URL_HERE"  # 🆕 请替换为你的webhook URL
+  platform: "feishu"  # 支持的平台: feishu, dingtalk, wechat_work, slack
 
-  # 通知事件
+  # 通知事件配置
   events:
-    - "signal_generated"
-    - "order_executed"
-    - "risk_limit_hit"
-    - "system_error"
+    system_startup: true      # 🆕 系统启动通知
+    system_shutdown: true     # 🆕 系统关闭通知
+    signal_generated: true    # 🆕 信号生成通知
+    order_submitted: true     # 🆕 订单提交通知
+    order_failed: true        # 🆕 订单失败通知
+    error_alert: true         # 🆕 错误告警
 
 # Tick数据转存配置 - V2.0优化版 (更大批次+更低频率+队列机制)
 tick_data_persistence:

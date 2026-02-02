@@ -219,6 +219,9 @@ class FastExecutionEngine:
         # 并发控制
         self.semaphore = asyncio.Semaphore(self.max_concurrent_requests)
 
+        # 🆕 Webhook通知
+        self.webhook = None  # 将由HighFrequencyTrader设置
+
         logger.info("快速执行引擎初始化完成")
 
     async def start(self):
@@ -469,7 +472,7 @@ class FastExecutionEngine:
         """处理执行结果"""
         if result['success']:
             # 执行成功
-            return ExecutionReport(
+            report = ExecutionReport(
                 request_id=request.request_id,
                 status=ExecutionStatus.SUBMITTED,
                 order=order,
@@ -482,6 +485,12 @@ class FastExecutionEngine:
                     'execution_method': 'websocket' if self.use_websocket else 'rest'
                 }
             )
+
+            # 🆕 发送订单提交成功通知
+            if self.webhook:
+                asyncio.create_task(self._send_order_submitted_notification(report))
+
+            return report
         else:
             # 执行失败，检查是否需要重试
             if request.retry_count < request.max_retries:
@@ -489,12 +498,18 @@ class FastExecutionEngine:
                 self.order_queue.put(request)  # 重新入队
                 logger.info(f"执行失败，重新入队: {request.request_id} (重试 {request.retry_count}/{request.max_retries})")
 
-            return ExecutionReport(
+            error_report = ExecutionReport(
                 request_id=request.request_id,
                 status=ExecutionStatus.REJECTED,
                 error_message=result.get('error', 'Unknown error'),
                 retry_count=request.retry_count
             )
+
+            # 🆕 发送订单提交失败通知
+            if self.webhook:
+                asyncio.create_task(self._send_order_failed_notification(request, result))
+
+            return error_report
 
     async def _wait_for_completion(self, request_id: str, timeout_ms: int) -> ExecutionReport:
         """等待执行完成"""
@@ -709,6 +724,65 @@ class FastExecutionEngine:
     def get_error_log(self, limit: int = 50) -> List[Dict]:
         """获取错误日志"""
         return list(self.error_log)[-limit:]
+
+    # ==================== 🆕 Webhook通知方法 ====================
+
+    async def _send_order_submitted_notification(self, report: ExecutionReport):
+        """发送订单提交成功通知"""
+        if not self.webhook or not report.order:
+            return
+
+        try:
+            from ..utils.webhook_util import WebhookMessage, MessageType
+
+            content = f"""✅ 订单提交成功
+📈 交易对: {report.order.symbol}
+📊 订单类型: {report.order.side.value} {report.order.order_type.value}
+💰 数量: {report.order.amount}
+💵 价格: ${report.order.price:.6f}
+🎫 订单ID: {report.exchange_order_id}
+⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+
+            message = WebhookMessage(
+                content=content,
+                msg_type=MessageType.TEXT,
+                priority=4,
+                title=f"订单提交 - {report.order.symbol}"
+            )
+
+            await self.webhook.send_message(message)
+            logger.debug(f"[{report.order.symbol}] [WEBHOOK] 订单提交通知已发送")
+
+        except Exception as e:
+            logger.error(f"[{report.order.symbol}] [WEBHOOK] 发送订单提交通知失败: {e}")
+
+    async def _send_order_failed_notification(self, request: ExecutionRequest, result: Dict):
+        """发送订单提交失败通知"""
+        if not self.webhook:
+            return
+
+        try:
+            from ..utils.webhook_util import WebhookMessage, MessageType
+
+            content = f"""❌ 订单提交失败
+📈 交易对: {request.signal.symbol}
+📊 信号类型: {request.signal.signal_type.value}
+❌ 错误信息: {result.get('error', 'Unknown error')}
+🔄 重试次数: {request.retry_count}/{request.max_retries}
+⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+
+            message = WebhookMessage(
+                content=content,
+                msg_type=MessageType.TEXT,
+                priority=5,  # 高优先级
+                title=f"❌ 订单失败 - {request.signal.symbol}"
+            )
+
+            await self.webhook.send_message(message)
+            logger.debug(f"[{request.signal.symbol}] [WEBHOOK] 订单失败通知已发送")
+
+        except Exception as e:
+            logger.error(f"[{request.signal.symbol}] [WEBHOOK] 发送订单失败通知失败: {e}")
 
 
 # 示例使用

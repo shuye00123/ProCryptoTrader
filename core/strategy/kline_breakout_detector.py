@@ -16,7 +16,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from collections import deque
 import pandas as pd
 import numpy as np
@@ -24,6 +24,59 @@ import numpy as np
 from core.strategy.base_strategy import Signal, SignalType
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# 类常量定义（替代魔术数字）
+# ============================================================================
+
+class DetectionConstants:
+    """检测器常量定义"""
+
+    # 成交量检测权重
+    VOLUME_SCORE_WEIGHT = 0.30
+    VOLUME_HALF_THRESHOLD_RATIO = 0.5
+    VOLUME_FULL_THRESHOLD_MULTIPLIER = 1.0
+    VOLUME_PARTIAL_THRESHOLD_MULTIPLIER = 0.5
+
+    # 动量检测权重
+    MOMENTUM_SCORE_WEIGHT = 0.30
+    MOMENTUM_CHANGE_SCORE = 0.3
+    MOMENTUM_DIRECTION_SCORE = 0.3
+    MOMENTUM_ACCELERATION_SCORE = 0.4
+
+    # 连续变动检测权重
+    CONSECUTIVE_SCORE_WEIGHT = 0.20
+    CONSECUTIVE_FULL_THRESHOLD_RATIO = 1.0
+    CONSECUTIVE_PARTIAL_THRESHOLD_RATIO = 0.6
+
+    # 路径突破检测权重
+    PATH_SCORE_WEIGHT = 0.20
+    PATH_FULL_SCORE = 1.0
+    PATH_PARTIAL_SCORE = 0.5
+    PATH_PROXIMITY_MULTIPLIER = 5.0
+
+    # 信号生成条件
+    MIN_STRONG_DETECTIONS = 2
+    DETECTION_SCORE_THRESHOLD = 0.5
+
+    # 默认值
+    DEFAULT_WINDOW_SIZE = 200
+    DEFAULT_VOLUME_SURGE_THRESHOLD = 3.0
+    DEFAULT_VOLUME_WINDOW = 50
+    DEFAULT_MOMENTUM_THRESHOLD = 0.0005
+    DEFAULT_MOMENTUM_WINDOW = 10
+    DEFAULT_CONSECUTIVE_MOVES_THRESHOLD = 5
+    DEFAULT_MIN_MOVE_THRESHOLD = 0.0001
+    DEFAULT_PATH_WINDOW = 20
+    DEFAULT_PATH_BREAKOUT_THRESHOLD = 0.0002
+    DEFAULT_MIN_SIGNAL_STRENGTH = 0.6
+    DEFAULT_SIGNAL_AMOUNT = 0.01
+
+
+# ============================================================================
+# 数据结构定义
+# ============================================================================
 
 
 @dataclass
@@ -74,23 +127,50 @@ class KlineBreakoutDetector:
                 - min_signal_strength: 最小信号强度（默认0.6）
         """
         # 成交量分析参数
-        self.volume_surge_threshold = config.get('volume_surge_threshold', 3.0)  # 3倍成交量
-        self.volume_window = config.get('volume_window', 50)  # 50条K线平均
+        self.volume_surge_threshold = config.get(
+            'volume_surge_threshold',
+            DetectionConstants.DEFAULT_VOLUME_SURGE_THRESHOLD
+        )
+        self.volume_window = config.get(
+            'volume_window',
+            DetectionConstants.DEFAULT_VOLUME_WINDOW
+        )
 
         # 价格动量参数
-        self.momentum_threshold = config.get('momentum_threshold', 0.0005)  # 0.05%价格变化
-        self.momentum_window = config.get('momentum_window', 10)  # 10条K线动量
+        self.momentum_threshold = config.get(
+            'momentum_threshold',
+            DetectionConstants.DEFAULT_MOMENTUM_THRESHOLD
+        )
+        self.momentum_window = config.get(
+            'momentum_window',
+            DetectionConstants.DEFAULT_MOMENTUM_WINDOW
+        )
 
         # 连续变动参数
-        self.consecutive_moves_threshold = config.get('consecutive_moves_threshold', 5)
-        self.min_move_threshold = config.get('min_move_threshold', 0.0001)  # 0.01%最小变动
+        self.consecutive_moves_threshold = config.get(
+            'consecutive_moves_threshold',
+            DetectionConstants.DEFAULT_CONSECUTIVE_MOVES_THRESHOLD
+        )
+        self.min_move_threshold = config.get(
+            'min_move_threshold',
+            DetectionConstants.DEFAULT_MIN_MOVE_THRESHOLD
+        )
 
         # 路径突破参数
-        self.path_window = config.get('path_window', 20)
-        self.path_breakout_threshold = config.get('path_breakout_threshold', 0.0002)  # 0.02%
+        self.path_window = config.get(
+            'path_window',
+            DetectionConstants.DEFAULT_PATH_WINDOW
+        )
+        self.path_breakout_threshold = config.get(
+            'path_breakout_threshold',
+            DetectionConstants.DEFAULT_PATH_BREAKOUT_THRESHOLD
+        )
 
         # 信号强度参数
-        self.min_signal_strength = config.get('min_signal_strength', 0.6)
+        self.min_signal_strength = config.get(
+            'min_signal_strength',
+            DetectionConstants.DEFAULT_MIN_SIGNAL_STRENGTH
+        )
 
         # 历史数据缓冲（用于计算指标）
         self.window_size = max(
@@ -101,12 +181,75 @@ class KlineBreakoutDetector:
         )
         self.kline_history: Dict[str, deque] = {}
 
-        logger.info(f"[KlineBreakoutDetector] 1s快速突破检测器初始化完成")
-        logger.info(f"  职责: Layer 1 - 纯粹的1s K线快速检测")
+        logger.info("[KlineBreakoutDetector] 1s快速突破检测器初始化完成")
+        logger.info("  职责: Layer 1 - 纯粹的1s K线快速检测")
         logger.info(f"  成交量阈值: {self.volume_surge_threshold}x")
         logger.info(f"  动量阈值: {self.momentum_threshold*100:.3f}%")
         logger.info(f"  连续变动: {self.consecutive_moves_threshold}次")
         logger.info(f"  路径窗口: {self.path_window}条")
+
+    # ========================================================================
+    # 输入验证方法
+    # ========================================================================
+
+    def _validate_input(self, kline: Kline, symbol: str) -> Tuple[bool, Optional[str]]:
+        """
+        验证输入参数的有效性
+
+        Args:
+            kline: 1秒K线数据
+            symbol: 交易对符号
+
+        Returns:
+            (is_valid, error_message): 验证结果和错误消息
+        """
+        if kline is None:
+            return False, "Kline数据为空"
+
+        if not symbol or not isinstance(symbol, str):
+            return False, f"无效的交易对符号: {symbol}"
+
+        # 验证价格数据
+        if not all([
+            isinstance(kline.open, (int, float)) and kline.open > 0,
+            isinstance(kline.high, (int, float)) and kline.high > 0,
+            isinstance(kline.low, (int, float)) and kline.low > 0,
+            isinstance(kline.close, (int, float)) and kline.close > 0,
+        ]):
+            return False, f"价格数据无效: O={kline.open}, H={kline.high}, L={kline.low}, C={kline.close}"
+
+        # 验证OHLC逻辑
+        if kline.high < kline.low:
+            return False, f"OHLC逻辑错误: high({kline.high}) < low({kline.low})"
+
+        if kline.high < max(kline.open, kline.close):
+            return False, f"OHLC逻辑错误: high({kline.high}) < max(open, close)"
+
+        if kline.low > min(kline.open, kline.close):
+            return False, f"OHLC逻辑错误: low({kline.low}) > min(open, close)"
+
+        # 验证成交量
+        if not isinstance(kline.volume, (int, float)) or kline.volume < 0:
+            return False, f"成交量无效: {kline.volume}"
+
+        return True, None
+
+    def _has_sufficient_data(self, symbol: str, required_length: Optional[int] = None) -> bool:
+        """
+        检查是否有足够的历史数据
+
+        Args:
+            symbol: 交易对符号
+            required_length: 需要的最小数据长度，默认使用momentum_window
+
+        Returns:
+            是否有足够数据
+        """
+        if required_length is None:
+            required_length = self.momentum_window
+
+        history = self.kline_history.get(symbol)
+        return history is not None and len(history) >= required_length
 
     def detect_breakout(
         self,
@@ -117,77 +260,123 @@ class KlineBreakoutDetector:
         """
         检测1秒K线快速突破 (Layer 1)
 
-        ⚠️ 重要：此方法不再使用higher_timeframe_data参数（保留仅为兼容性）
+        重要：此方法不再使用higher_timeframe_data参数（保留仅为兼容性）
                   更高时间框架的技术指标确认由Layer 2负责
 
         Args:
             kline: 1秒K线数据
             symbol: 交易对符号
-            higher_timeframe_data: ⚠️ 已废弃，不再使用（保留仅为兼容性）
+            higher_timeframe_data: 已废弃，不再使用（保留仅为兼容性）
 
         Returns:
             Signal: 初步突破信号（如果检测到突破），否则None
         """
         try:
-            # 更新K线历史
-            self._update_kline_history(kline, symbol)
-
-            # 检查是否有足够数据
-            history = self.kline_history.get(symbol)
-            if not history or len(history) < self.momentum_window:
+            # 1. 输入验证
+            is_valid, error_msg = self._validate_input(kline, symbol)
+            if not is_valid:
+                logger.warning(f"[{symbol}] 输入验证失败: {error_msg}")
                 return None
 
-            # === Layer 1检测：纯粹的1s K线分析 ===
+            # 2. 更新K线历史
+            self._update_kline_history(kline, symbol)
 
-            # 1. 成交量激增检测（权重30%）
-            volume_score = self._detect_volume_surge(kline, symbol)
+            # 3. 检查数据充足性
+            if not self._has_sufficient_data(symbol):
+                return None
 
-            # 2. 价格动量检测（权重30%）
-            momentum_score = self._detect_price_momentum(kline, symbol)
+            # 4. 计算各维度检测得分
+            detection_scores = self._calculate_detection_scores(kline, symbol)
 
-            # 3. 连续变动检测（权重20%）
-            consecutive_score = self._detect_consecutive_moves(kline, symbol)
+            # 5. 计算综合信号强度
+            signal_strength = self._calculate_signal_strength(detection_scores)
 
-            # 4. 路径突破检测（权重20%）
-            path_score = self._detect_path_breakout(kline, symbol)
-
-            # 综合评分
-            signal_strength = (
-                volume_score * 0.30 +
-                momentum_score * 0.30 +
-                consecutive_score * 0.20 +
-                path_score * 0.20
-            )
-
-            # 收集检测详情
-            detection_details = {
-                'volume_score': volume_score,
-                'momentum_score': momentum_score,
-                'consecutive_score': consecutive_score,
-                'path_score': path_score,
-                'total_strength': signal_strength
-            }
-
-            # 判断是否生成初步信号
-            if signal_strength >= self.min_signal_strength:
-                # 至少有2个检测方法得分>0.5
-                strong_detections = sum([
-                    volume_score > 0.5,
-                    momentum_score > 0.5,
-                    consecutive_score > 0.5,
-                    path_score > 0.5
-                ])
-
-                if strong_detections >= 2:
-                    return self._create_preliminary_signal(
-                        kline, symbol, signal_strength, detection_details
-                    )
+            # 6. 判断是否生成信号
+            if self._should_generate_signal(detection_scores, signal_strength):
+                return self._create_preliminary_signal(
+                    kline, symbol, signal_strength, detection_scores
+                )
 
             return None
 
         except Exception as e:
             logger.error(f"[{symbol}] Layer 1检测失败: {e}")
             return None
+
+    # ========================================================================
+    # 检测得分计算方法
+    # ========================================================================
+
+    def _calculate_detection_scores(
+        self,
+        kline: Kline,
+        symbol: str
+    ) -> Dict[str, float]:
+        """
+        计算各维度的检测得分
+
+        Args:
+            kline: 1秒K线数据
+            symbol: 交易对符号
+
+        Returns:
+            包含各维度得分的字典
+        """
+        return {
+            'volume_score': self._detect_volume_surge(kline, symbol),
+            'momentum_score': self._detect_price_momentum(kline, symbol),
+            'consecutive_score': self._detect_consecutive_moves(kline, symbol),
+            'path_score': self._detect_path_breakout(kline, symbol)
+        }
+
+    def _calculate_signal_strength(self, detection_scores: Dict[str, float]) -> float:
+        """
+        计算综合信号强度
+
+        Args:
+            detection_scores: 各维度检测得分
+
+        Returns:
+            综合信号强度 [0, 1]
+        """
+        signal_strength = (
+            detection_scores['volume_score'] * DetectionConstants.VOLUME_SCORE_WEIGHT +
+            detection_scores['momentum_score'] * DetectionConstants.MOMENTUM_SCORE_WEIGHT +
+            detection_scores['consecutive_score'] * DetectionConstants.CONSECUTIVE_SCORE_WEIGHT +
+            detection_scores['path_score'] * DetectionConstants.PATH_SCORE_WEIGHT
+        )
+        # 添加total_strength到scores中以便后续使用
+        detection_scores['total_strength'] = signal_strength
+        return signal_strength
+
+    def _should_generate_signal(
+        self,
+        detection_scores: Dict[str, float],
+        signal_strength: float
+    ) -> bool:
+        """
+        判断是否应该生成信号
+
+        Args:
+            detection_scores: 各维度检测得分
+            signal_strength: 综合信号强度
+
+        Returns:
+            是否生成信号
+        """
+        # 检查最小信号强度
+        if signal_strength < self.min_signal_strength:
+            return False
+
+        # 检查强检测数量（至少需要2个检测方法得分>0.5）
+        strong_detections = sum([
+            detection_scores['volume_score'] > DetectionConstants.DETECTION_SCORE_THRESHOLD,
+            detection_scores['momentum_score'] > DetectionConstants.DETECTION_SCORE_THRESHOLD,
+            detection_scores['consecutive_score'] > DetectionConstants.DETECTION_SCORE_THRESHOLD,
+            detection_scores['path_score'] > DetectionConstants.DETECTION_SCORE_THRESHOLD
+        ])
+
+        return strong_detections >= DetectionConstants.MIN_STRONG_DETECTIONS
 
     def _update_kline_history(self, kline: Kline, symbol: str):
         """更新K线历史数据"""
@@ -218,15 +407,15 @@ class KlineBreakoutDetector:
             # 当前成交量倍数
             volume_ratio = kline.volume / avg_volume
 
-            # 评分：使用sigmoid函数平滑
+            # 评分：使用阈值平滑
             if volume_ratio >= self.volume_surge_threshold:
-                # 3倍以上 = 1.0分
-                score = 1.0
-            elif volume_ratio >= self.volume_surge_threshold * 0.5:
-                # 1.5倍以上 = 0.5分
-                score = 0.5
+                # 达到阈值倍数 = 1.0分
+                score = DetectionConstants.VOLUME_FULL_THRESHOLD_MULTIPLIER
+            elif volume_ratio >= self.volume_surge_threshold * DetectionConstants.VOLUME_HALF_THRESHOLD_RATIO:
+                # 达到一半阈值 = 0.5分
+                score = DetectionConstants.VOLUME_PARTIAL_THRESHOLD_MULTIPLIER
             else:
-                # 低于1.5倍 = 0分
+                # 低于阈值 = 0分
                 score = 0.0
 
             if score > 0:
@@ -276,15 +465,15 @@ class KlineBreakoutDetector:
 
                 # 大幅价格变化
                 if abs(change_1) > self.momentum_threshold:
-                    score += 0.3
+                    score += DetectionConstants.MOMENTUM_CHANGE_SCORE
 
                 # 动量方向一致
                 if (change_1 > 0 and change_3 > 0) or (change_1 < 0 and change_3 < 0):
-                    score += 0.3
+                    score += DetectionConstants.MOMENTUM_DIRECTION_SCORE
 
                 # 加速度支持
                 if (change_1 > 0 and acceleration > 0) or (change_1 < 0 and acceleration < 0):
-                    score += 0.4
+                    score += DetectionConstants.MOMENTUM_ACCELERATION_SCORE
 
                 score = min(score, 1.0)
 
@@ -342,8 +531,8 @@ class KlineBreakoutDetector:
             # 评分
             if consecutive_moves >= self.consecutive_moves_threshold:
                 # 达到阈值 = 1.0分
-                score = 1.0
-            elif consecutive_moves >= self.consecutive_moves_threshold * 0.6:
+                score = DetectionConstants.CONSECUTIVE_FULL_THRESHOLD_RATIO
+            elif consecutive_moves >= self.consecutive_moves_threshold * DetectionConstants.CONSECUTIVE_PARTIAL_THRESHOLD_RATIO:
                 # 达到60%阈值 = 0.5分
                 score = 0.5
             else:
@@ -389,19 +578,19 @@ class KlineBreakoutDetector:
 
             # 突破局部高点
             if current_price > local_high * (1 + self.path_breakout_threshold):
-                score = 1.0
+                score = DetectionConstants.PATH_FULL_SCORE
                 logger.debug(f"[{symbol}] 路径突破: 突破局部高点 {local_high:.6f}")
 
             # 突破局部低点
             elif current_price < local_low * (1 - self.path_breakout_threshold):
-                score = 1.0
+                score = DetectionConstants.PATH_FULL_SCORE
                 logger.debug(f"[{symbol}] 路径突破: 突破局部低点 {local_low:.6f}")
 
             # 接近关键位（0.5分）
-            elif abs(current_price - local_high) / local_high < self.path_breakout_threshold * 5:
-                score = 0.5
-            elif abs(current_price - local_low) / local_low < self.path_breakout_threshold * 5:
-                score = 0.5
+            elif abs(current_price - local_high) / local_high < self.path_breakout_threshold * DetectionConstants.PATH_PROXIMITY_MULTIPLIER:
+                score = DetectionConstants.PATH_PARTIAL_SCORE
+            elif abs(current_price - local_low) / local_low < self.path_breakout_threshold * DetectionConstants.PATH_PROXIMITY_MULTIPLIER:
+                score = DetectionConstants.PATH_PARTIAL_SCORE
 
             return score
 
@@ -458,7 +647,7 @@ class KlineBreakoutDetector:
             signal_type=signal_type,
             symbol=symbol,
             price=kline.close,
-            amount=0.01,  # 简化版，后续由策略计算
+            amount=DetectionConstants.DEFAULT_SIGNAL_AMOUNT,  # 简化版，后续由策略计算
             confidence=strength,
             metadata={
                 'reason': reason,

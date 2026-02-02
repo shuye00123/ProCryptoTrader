@@ -117,6 +117,16 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             'total_klines_processed': 0  # 处理的K线总数
         }
 
+        # ==================== 信号去重机制 ====================
+        # 记录每个交易对的最后信号时间，防止短时间重复信号
+        self.last_signals: Dict[str, datetime] = {}
+        # 信号冷却期（秒），从配置读取，默认60秒
+        self.signal_cooldown = config.get('strategy', {}).get('signal_cooldown', 60)
+        logger.info(f"[{self.name}] 信号冷却期: {self.signal_cooldown}秒")
+
+        # ==================== 🆕 Webhook通知 ====================
+        self.webhook = None  # 将由HighFrequencyTrader设置
+
         # ==================== 性能优化组件（Phase 0-3） ====================
         mode = config.get('mode', 'paper')
 
@@ -818,6 +828,12 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         try:
             symbol = kline.symbol
 
+            # ==================== 🆕 信号冷却期检查 ====================
+            if self._is_in_cooldown_period(symbol, kline.timestamp):
+                # 在冷却期内，跳过信号检测
+                return
+            # ====================================================================
+
             # 更新K线缓冲区
             if symbol not in self.kline_1s_buffer:
                 self.kline_1s_buffer[symbol] = deque(maxlen=self.kline_detector.window_size)
@@ -841,10 +857,77 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 )
 
                 if confirmed_signal:
+                    # 🆕 更新最后信号时间（去重）
+                    self._update_last_signal_time(symbol, kline.timestamp)
+
                     await self._execute_signal(confirmed_signal)
 
         except Exception as e:
             logger.error(f"[{kline.symbol}] 处理K线更新时出错: {e}")
+
+    # ========================================================================
+    # 信号去重机制
+    # ========================================================================
+
+    def _is_in_cooldown_period(self, symbol: str, current_time: datetime) -> bool:
+        """
+        检查指定交易对是否在信号冷却期内
+
+        Args:
+            symbol: 交易对符号
+            current_time: 当前时间
+
+        Returns:
+            是否在冷却期内
+        """
+        if symbol not in self.last_signals:
+            return False
+
+        last_signal_time = self.last_signals[symbol]
+        time_since_last = (current_time - last_signal_time).total_seconds()
+
+        is_in_cooldown = time_since_last < self.signal_cooldown
+
+        if is_in_cooldown:
+            logger.debug(f"[{symbol}] 在冷却期内，距离上次信号 {time_since_last:.1f}秒 < {self.signal_cooldown}秒")
+
+        return is_in_cooldown
+
+    def _update_last_signal_time(self, symbol: str, timestamp: datetime):
+        """
+        更新交易对的最后信号时间
+
+        Args:
+            symbol: 交易对符号
+            timestamp: 信号时间戳
+        """
+        self.last_signals[symbol] = timestamp
+        logger.debug(f"[{symbol}] 更新最后信号时间: {timestamp.isoformat()}")
+
+    async def _send_signal_webhook(self, signal: Signal):
+        """
+        发送信号生成Webhook通知
+
+        Args:
+            signal: 确认后的交易信号
+        """
+        if not self.webhook:
+            logger.debug(f"[{signal.symbol}] Webhook未配置，跳过信号通知")
+            return
+
+        try:
+            # 使用webhook工具的send_trading_signal方法
+            await self.webhook.send_trading_signal(
+                symbol=signal.symbol,
+                signal_type=signal.signal_type.value,
+                price=signal.price,
+                confidence=signal.confidence,
+                strategy_name="MultiTimeframeKlineBreakout",
+                timestamp=signal.timestamp.isoformat() if hasattr(signal, 'timestamp') else datetime.now().isoformat()
+            )
+            logger.info(f"[{signal.symbol}] [WEBHOOK] 信号通知已发送: {signal.signal_type.value}")
+        except Exception as e:
+            logger.error(f"[{signal.symbol}] [WEBHOOK] 发送信号通知失败: {e}")
 
     # ========================================================================
     # Layer 2确认辅助方法
@@ -899,6 +982,10 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             self.signal_stats['confirmed_signals'] += 1
             logger.info(f"[{symbol}] [CONFIRMED] Layer 2确认通过: {confirmed_signal.signal_type.value}, "
                        f"置信度: {preliminary_signal.confidence:.2f} → {confirmed_signal.confidence:.2f}")
+
+            # 🆕 发送信号生成Webhook通知
+            await self._send_signal_webhook(confirmed_signal)
+
             return confirmed_signal
         else:
             logger.info(f"[{symbol}] [REJECTED] Layer 2确认未通过")

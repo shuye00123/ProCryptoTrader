@@ -1,0 +1,265 @@
+# 多时间框架K线突破策略回测配置
+# 用于BABYUSDT、GMTUSDT、GUNUSDT的回测测试
+
+# 基础配置
+basic:
+  mode: "backtest"                 # 回测模式
+  strategy: "MultiTimeframeKlineBreakout"
+  initial_balance: 1000.0           # 初始资金 1000 USDT
+  max_drawdown: 0.1                 # 最大回撤 10%
+  max_daily_loss: 0.03              # 最大日亏损 3%
+
+# 交易规模配置
+trading:
+  target_trade_value_usdt: 50.0     # 目标交易价值
+  min_trade_value_usdt: 20.0        # 最小交易价值
+  max_trade_value_usdt: 100.0       # 最大交易价值
+  max_total_value_usdt: 500.0       # 最大总持仓价值
+  max_daily_value_usdt: 1000.0      # 最大日交易价值
+
+# 交易对配置
+symbols:
+  - "BABY-USDT"
+  - "GMT-USDT"
+  - "GUN-USDT"
+
+# 数据源配置
+data_source:
+  type: "local"
+  data_dir: "data/binance"
+  exchange: "binance"
+  timeframes: ['1s', '15m', '1h']
+  enable_data_validation: true
+  max_data_delay: 1000
+
+# 回测时间范围
+backtest:
+  start_date: "2026-01-01"
+  end_date: "2026-01-10"
+
+# 策略配置
+strategy:
+  name: "MultiTimeframeKlineBreakout"
+  class: "MultiTimeframeKlineBreakout"
+
+  # 基础参数
+  max_positions: 2                  # 最大持仓数量 (小资金测试，降低到2)
+  position_size: 0.05               # 每次开仓比例 (5%)
+  max_position_size: 0.1            # 单个持仓最大比例 (10%)
+  max_total_exposure: 0.2           # 最大总敞口 (20%)
+  signal_cooldown: 30               # 信号冷却期（秒）
+
+  # ==================== 1秒K线突破检测配置 ====================
+  kline_breakout:
+    enabled: true
+    window_size: 200                # 200个1秒K线 = 3.3分钟
+    min_breakout_strength: 2.5      # 最小突破强度（平衡阈值）
+    volume_threshold: 2.0
+    consecutive_moves_threshold: 5
+    breakout_cooldown: 30000        # 30秒per-symbol冷却期
+
+    # 多重确认机制
+    require_multiple_confirmation: true
+    min_confirmation_count: 2        # 需要2个算法确认
+    confirmation_window: 5000        # 5秒确认窗口
+
+    # 统计突破参数（平衡版）
+    statistical_breakout:
+      enabled: true
+      price_deviation_threshold: 2.8   # 平衡Z阈值
+      momentum_ratio_threshold: 2.5
+
+    # 连续变动突破参数
+    consecutive_breakout:
+      enabled: true
+      min_consecutive_moves: 5
+      min_move_threshold: 0.001
+
+    # 成交量突破参数（平衡版）
+    volume_breakout:
+      enabled: true
+      volume_surge_threshold: 3.0      # 平衡Volume阈值
+      min_price_change: 0.008
+      min_avg_volume: 1
+      min_data_points: 100
+
+    # 路径突破参数
+    path_breakout:
+      enabled: true
+      breakout_threshold: 0.005
+      support_resistance_window: 50
+      min_data_points: 50
+      virtual_level_offset: 0.001
+
+  # ==================== 多时间框架确认配置 ====================
+  multi_timeframe:
+    enabled: true
+    timeframes: ['15m', '1h']
+    min_timeframes: 2                # 至少2个时间框架确认
+    min_indicators: 2                # 降低到2个指标 (回测数据较少)
+
+    # 指标阈值（平衡版）
+    rsi_min: 30                      # RSI最小值（避免超卖）
+    rsi_max: 70                      # RSI最大值（避免超买）
+    bb_position_min: 0.7             # 布林带位置最小值
+    volume_ratio_min: 1.5            # 成交量比率最小值
+    momentum_min: 0.002              # 动量最小值
+
+    # 15分钟指标配置
+    timeframe_15m:
+      enabled: true
+      indicators: ['SMA_5_15', 'BOLLINGER', 'RSI']
+      weights:
+        SMA_5_15: 0.4
+        BOLLINGER: 0.3
+        RSI: 0.3
+
+    # 1小时指标配置
+    timeframe_1h:
+      enabled: true
+      indicators: ['EMA_12_26', 'MACD', 'VOLUME_TREND']
+      weights:
+        EMA_12_26: 0.4
+        MACD: 0.4
+        VOLUME_TREND: 0.2
+
+  # 原有突破检测器（保持关闭）
+  breakout:
+    enabled: false
+    lookback_period: 50
+    volume_threshold: 1.5
+    volatility_threshold: 0.02
+    momentum_threshold: 0.01
+    support_resistance_lookback: 100
+    min_breakout_strength: 0.6
+
+  # 风险管理
+  risk_management:
+    max_drawdown: 0.1
+    max_daily_loss: 0.03
+    position_risk_limit: 0.02
+    use_trailing_stop: true
+    trailing_stop_distance: 0.02
+
+  # 信号过滤器
+  signal_filters:
+    enabled: true
+    min_signal_quality: 0.6          # 降低信号质量要求 (0.75 -> 0.6)
+    max_signals_per_minute: 3        # 提高信号频率限制 (2 -> 3)
+    duplicate_signal_filter: true
+    require_volume_confirmation: true
+    min_confirmation_count: 2
+    quality_score_threshold: 0.7      # 降低质量阈值 (0.75 -> 0.7)
+
+# 交易所配置 (回测模式不使用)
+exchange:
+  api_key: ""
+  api_secret: ""
+  sandbox: false
+  testnet: false
+
+  websocket:
+    reconnect_attempts: 10
+    reconnect_delay: 5000
+    connection_timeout: 10000
+    ping_interval: 30000
+    subscription_limit: 100
+
+# 执行引擎配置
+execution:
+  enable_batch_execution: false
+  default_timeout: 5000
+  max_queue_size: 1000
+  enable_order_validation: true
+  default_priority: "HIGH"
+  max_retries: 2
+  retry_delay: 100
+
+# 监控和统计
+monitoring:
+  enable_performance_monitoring: true
+  stats_update_interval: 10
+  log_level: "INFO"
+  log_executed_orders: true
+  log_signal_details: true
+  enable_realtime_stats: true
+  stats_save_interval: 300
+
+# 风险控制
+risk_control:
+  max_position_value: 100            # 最大单仓价值 (小资金)
+  max_total_position_value: 300      # 最大总持仓价值 (小资金)
+  default_stop_loss: 0.05            # 5% 止损
+  default_take_profit: 0.1           # 10% 止盈
+  max_holding_time: 3600             # 最大持仓时间 1小时
+  max_volatility_threshold: 0.05
+  volatility_stop: true
+
+# 输出配置
+output:
+  save_results: true
+  results_dir: "./results/baby_gmt_gun_backtest"
+  generate_reports: true
+  report_interval: 300
+  save_stats: true
+  stats_format: "json"
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/baby_gmt_gun_backtest.log"
+  max_file_size: "10MB"
+  backup_count: 5
+  console: true
+  modules:
+    "MultiTimeframeKlineBreakout": "INFO"
+    "core.strategy.kline_breakout_detector": "INFO"
+    "core.strategy.multi_timeframe_confirmator": "INFO"
+    "core.trading.fast_execution": "INFO"
+
+# 通知配置
+notifications:
+  enabled: false
+  webhook_url: ""
+  events:
+    - "signal_generated"
+    - "order_executed"
+    - "risk_limit_hit"
+    - "system_error"
+
+# 性能优化配置
+multi_timeframe_subscription:
+  enabled: false                    # 回测模式不使用WebSocket
+  timeframes: []
+
+indicator_cache:
+  enabled: false                    # 回测模式不使用缓存
+
+cache_presets:
+  default:
+    max_age_seconds: 3600
+    cleanup_interval: 300
+
+performance:
+  enable_metrics: true
+  log_cache_hit_rate: false          # 回测模式不使用
+  log_calculation_time: true
+  log_processing_stats: true
+  stats_update_interval: 60
+  print_statistics_on_stop: true
+
+# 数据提供者配置
+data_provider:
+  backtest:
+    data_dir: "data"
+    cache_enabled: false
+    validate_data: true
+  realtime:
+    enable_rest_api_fallback: false
+    warmup_periods: 200
+    max_cache_size: 500
+
+# Tick数据转存配置（回测不使用）
+tick_data_persistence:
+  enabled: false
