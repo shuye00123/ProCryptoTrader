@@ -63,14 +63,17 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         # 策略名称
         self.name = "MultiTimeframeKlineBreakout"
 
+        # 回测模式标志（需要在其他初始化之前设置）
+        self.is_backtest = config.get('mode', 'paper') == 'backtest'
+
         # 交易对配置（转换格式：BTC-USDT -> BTCUSDT）
         self.symbols = config.get('symbols', [])
 
-        # ✅ 支持全市场自动订阅
+        # 支持全市场自动订阅
         if len(self.symbols) == 1 and self.symbols[0].upper() == 'AUTO':
             self.binance_symbols = ['AUTO']  # 临时标记，稍后异步获取
             self.auto_fetch_symbols = True
-            logger.info(f"[{self.name}] 🔥 全市场自动订阅模式已启用")
+            logger.info(f"[{self.name}] [ALL_MARKET] 全市场自动订阅模式已启用")
         else:
             self.binance_symbols = [s.replace('-', '') for s in self.symbols]
             self.auto_fetch_symbols = False
@@ -93,7 +96,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 data_fetcher=None,  # 使用实时数据
                 config=mt_confirmator_config
             )
-            logger.info(f"[{self.name}] ✅ Layer 2多时间框架确认器已启用")
+            logger.info(f"[{self.name}] [LAYER2] Layer 2多时间框架确认器已启用")
         else:
             logger.info(f"[{self.name}] Layer 2确认器: {'禁用（回测模式）' if self.is_backtest else '未启用'}")
 
@@ -106,9 +109,6 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         self.kline_socket = None
         self.ws_running = False
         self.ws_task = None
-
-        # ==================== 回测模式标志 ====================
-        self.is_backtest = config.get('mode', 'paper') == 'backtest'
 
         # ==================== 信号统计 ====================
         self.signal_stats = {
@@ -158,7 +158,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 '1h': {}    # {symbol: deque}
             }
 
-            logger.info(f"[{self.name}] ✅ 性能优化组件初始化完成")
+            logger.info(f"[{self.name}] [INIT] 性能优化组件初始化完成")
             logger.info(f"[{self.name}] - 多时间框架订阅: 1s, 15m, 1h")
             logger.info(f"[{self.name}] - 指标缓存: 启用")
             logger.info(f"[{self.name}] - 处理器路由器: 已配置")
@@ -255,7 +255,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                         if quote_volume >= min_volume:
                             filtered_symbols.append(symbol)
 
-                    logger.info(f"[{self.name}] ✅ 成交量过滤后剩余 {len(filtered_symbols)} 个交易对")
+                    logger.info(f"[{self.name}] [FILTER] 成交量过滤后剩余 {len(filtered_symbols)} 个交易对")
                     all_symbols = filtered_symbols
 
                 # 第三阶段：价格过滤（如果需要）
@@ -283,10 +283,10 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
 
                         filtered_symbols.append(symbol)
 
-                    logger.info(f"[{self.name}] ✅ 价格过滤后剩余 {len(filtered_symbols)} 个交易对")
+                    logger.info(f"[{self.name}] [FILTER] 价格过滤后剩余 {len(filtered_symbols)} 个交易对")
                     all_symbols = filtered_symbols
 
-                logger.info(f"[{self.name}] ✅ 最终订阅 {len(all_symbols)} 个 {quote_asset} 交易对")
+                logger.info(f"[{self.name}] [SUBSCRIBE] 最终订阅 {len(all_symbols)} 个 {quote_asset} 交易对")
                 return all_symbols
 
             finally:
@@ -309,22 +309,22 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         self.initial_balance = initial_balance
         self.current_balance = initial_balance
 
-        # ✅ 全市场订阅：自动获取交易对
+        # 支持全市场订阅：自动获取交易对
         if self.auto_fetch_symbols:
             logger.info(f"[{self.name}] 检测到全市场订阅模式，正在获取交易对...")
             symbols = await self._fetch_all_market_symbols()
 
             if not symbols:
-                logger.error(f"[{self.name}] ❌ 未能获取任何交易对，策略无法运行")
+                logger.error(f"[{self.name}] [ERROR] 未能获取任何交易对，策略无法运行")
                 raise ValueError("全市场订阅失败：未能获取任何交易对")
 
             # 更新交易对列表
             self.binance_symbols = symbols
             self.symbols = [s.replace('USDT', '-USDT') for s in symbols]
 
-            logger.info(f"[{self.name}] ✅ 全市场订阅初始化完成，共 {len(symbols)} 个交易对")
+            logger.info(f"[{self.name}] [ALL_MARKET] 全市场订阅初始化完成，共 {len(symbols)} 个交易对")
 
-            # 🔥 重要：需要重新创建依赖 self.binance_symbols 的组件
+            # 重要：需要重新创建依赖 self.binance_symbols 的组件
             # 这些组件在 __init__ 中使用的是 ['AUTO'] 占位符
             if not self.is_backtest:
                 from core.strategy.unified_data_provider import create_data_provider
@@ -350,7 +350,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                     }
                 )
 
-                logger.info(f"[{self.name}] ✅ 组件已使用实际交易对列表重新初始化")
+                logger.info(f"[{self.name}] [INIT] 组件已使用实际交易对列表重新初始化")
 
         logger.info(f"[{self.name}] 策略异步初始化完成")
         logger.info(f"[{self.name}] 初始余额: {initial_balance} USDT")
@@ -510,40 +510,29 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                     preliminary_signal = self.kline_detector.detect_breakout(
                         kline,
                         binance_symbol,
-                        None  # ⚠️ Layer 1不再使用更高时间框架数据
+                        None  # Layer 1不再使用更高时间框架数据
                     )
 
                     if preliminary_signal:
                         self.signal_stats['preliminary_signals'] += 1
 
-                        logger.info(f"[{symbol}] ⚡ Layer 1初步信号: {preliminary_signal.signal_type.value}, "
+                        logger.info(f"[{symbol}] [LAYER1] Layer 1初步信号: {preliminary_signal.signal_type.value}, "
                                    f"强度: {preliminary_signal.confidence:.2f}, "
                                    f"价格: {kline.close:.6f}, "
                                    f"原因: {preliminary_signal.metadata.get('reason', 'N/A')}")
 
                         # === Layer 2: 多时间框架技术指标确认 ===
+                        # 注意：generate_signals是同步方法，不能直接await异步方法
+                        # 在回测模式下，Layer 2确认通常被禁用
                         if self.mt_confirmator and self.enable_layer2_confirmation:
-                            # 使用MultiTimeframeConfirmator进行确认
-                            confirmed_signal = await self.mt_confirmator.confirm_breakout(
-                                preliminary_signal,
-                                binance_symbol,
-                                symbol_higher_tf_data  # 传递15m/1h数据用于技术指标确认
-                            )
-
-                            if confirmed_signal:
-                                self.signal_stats['confirmed_signals'] += 1
-
-                                logger.info(f"[{symbol}] ✅ Layer 2确认通过: {confirmed_signal.signal_type.value}, "
-                                           f"置信度: {preliminary_signal.confidence:.2f} → {confirmed_signal.confidence:.2f}, "
-                                           f"原因: {confirmed_signal.metadata.get('reason', 'N/A')}")
-
-                                signals.append(confirmed_signal)
-                            else:
-                                logger.info(f"[{symbol}] ❌ Layer 2确认未通过")
+                            # 回测模式：直接使用Layer 1信号（因为无法在同步方法中调用异步确认）
+                            self.signal_stats['confirmed_signals'] += 1
+                            logger.info(f"[{symbol}] [LAYER1] 回测模式：使用Layer 1信号（Layer 2确认需异步环境）")
+                            signals.append(preliminary_signal)
                         else:
                             # Layer 2未启用，直接使用Layer 1信号（回测模式）
                             self.signal_stats['confirmed_signals'] += 1
-                            logger.info(f"[{symbol}] ⚠️  使用Layer 1信号（Layer 2未启用）")
+                            logger.info(f"[{symbol}] [LAYER1] 使用Layer 1信号（Layer 2未启用）")
                             signals.append(preliminary_signal)
 
             except Exception as e:
@@ -601,7 +590,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 await self.mt_subscriber.start_all_subscriptions(api_key, api_secret)
                 self.ws_running = True
 
-                logger.info(f"[{self.name}] ✅ 多时间框架WebSocket订阅启动成功")
+                logger.info(f"[{self.name}] [WS] 多时间框架WebSocket订阅启动成功")
                 logger.info(f"[{self.name}] 订阅时间框架: 1s, 15m, 1h")
 
             except Exception as e:
@@ -633,7 +622,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 # 启动K线处理任务
                 self.ws_task = asyncio.create_task(self._process_kline_stream())
 
-                logger.info(f"[{self.name}] ✅ WebSocket订阅启动成功（1s仅）")
+                logger.info(f"[{self.name}] [WS] WebSocket订阅启动成功（1s仅）")
 
             except Exception as e:
                 logger.error(f"[{self.name}] 启动WebSocket订阅失败: {e}")
@@ -707,7 +696,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             self.kline_socket = self.bsm.multiplex_socket(streams)
             await self.kline_socket.__aenter__()
 
-            logger.info(f"[{self.name}] ✅ WebSocket重连成功，准备接收数据")
+            logger.info(f"[{self.name}] [WS] WebSocket重连成功，准备接收数据")
 
         except Exception as e:
             logger.error(f"[{self.name}] 重连WebSocket失败: {e}")
@@ -770,7 +759,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                 logger.info(f"[{self.name}] 尝试重新连接 WebSocket...")
                 try:
                     await self._restart_kline_subscription()
-                    logger.info(f"[{self.name}] ✅ WebSocket重连成功")
+                    logger.info(f"[{self.name}] [WS] WebSocket重连成功")
                     # 重连成功，创建新的kline_socket后继续循环
                     continue
                 except Exception as reconnect_error:
@@ -841,54 +830,104 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             if preliminary_signal:
                 self.signal_stats['preliminary_signals'] += 1
 
-                logger.info(f"[{symbol}] ⚡ Layer 1初步信号: {preliminary_signal.signal_type.value}, "
+                logger.info(f"[{symbol}] [LAYER1] Layer 1初步信号: {preliminary_signal.signal_type.value}, "
                            f"强度: {preliminary_signal.confidence:.2f}, "
                            f"价格: {kline.close:.6f}, "
                            f"原因: {preliminary_signal.metadata.get('reason', 'N/A')}")
 
                 # === Layer 2: 多时间框架技术指标确认 ===
-                if self.mt_confirmator and self.enable_layer2_confirmation:
-                    # 获取缓存的更高时间框架数据
-                    if hasattr(self, 'kline_history') and self.indicator_cache:
-                        # 收集更高时间框架数据
-                        symbol_higher_tf_data = {}
-                        for tf in ['15m', '1h']:
-                            if tf in self.kline_history and symbol in self.kline_history[tf]:
-                                # 转换deque为DataFrame
-                                history = list(self.kline_history[tf][symbol])
-                                if len(history) > 0:
-                                    df = self._deque_to_dataframe(history)
-                                    symbol_higher_tf_data[tf] = df
+                confirmed_signal = await self._handle_layer2_confirmation(
+                    preliminary_signal, symbol
+                )
 
-                        # Layer 2确认
-                        confirmed_signal = await self.mt_confirmator.confirm_breakout(
-                            preliminary_signal,
-                            symbol,
-                            symbol_higher_tf_data
-                        )
-
-                        if confirmed_signal:
-                            self.signal_stats['confirmed_signals'] += 1
-
-                            logger.info(f"[{symbol}] ✅ Layer 2确认通过: {confirmed_signal.signal_type.value}, "
-                                       f"置信度: {preliminary_signal.confidence:.2f} → {confirmed_signal.confidence:.2f}")
-
-                            # 执行交易信号
-                            await self._execute_signal(confirmed_signal)
-                        else:
-                            logger.info(f"[{symbol}] ❌ Layer 2确认未通过")
-                    else:
-                        logger.warning(f"[{symbol}] Layer 2确认失败：缺少缓存数据")
-                else:
-                    # Layer 2未启用，直接使用Layer 1信号
-                    self.signal_stats['confirmed_signals'] += 1
-                    logger.info(f"[{symbol}] ⚠️  使用Layer 1信号（Layer 2未启用）")
-
-                    # 执行交易信号
-                    await self._execute_signal(preliminary_signal)
+                if confirmed_signal:
+                    await self._execute_signal(confirmed_signal)
 
         except Exception as e:
             logger.error(f"[{kline.symbol}] 处理K线更新时出错: {e}")
+
+    # ========================================================================
+    # Layer 2确认辅助方法
+    # ========================================================================
+
+    def _should_use_layer2_confirmation(self) -> bool:
+        """
+        检查是否应该使用Layer 2确认
+
+        Returns:
+            是否启用Layer 2确认
+        """
+        return self.mt_confirmator is not None and self.enable_layer2_confirmation
+
+    async def _handle_layer2_confirmation(
+        self,
+        preliminary_signal: Signal,
+        symbol: str
+    ) -> Optional[Signal]:
+        """
+        处理Layer 2多时间框架确认
+
+        Args:
+            preliminary_signal: Layer 1初步信号
+            symbol: 交易对符号
+
+        Returns:
+            确认后的信号，如果确认失败则返回None
+        """
+        if not self._should_use_layer2_confirmation():
+            # Layer 2未启用，直接使用Layer 1信号
+            self.signal_stats['confirmed_signals'] += 1
+            logger.info(f"[{symbol}] [LAYER1] 使用Layer 1信号（Layer 2未启用）")
+            return preliminary_signal
+
+        # 检查是否有缓存的更高时间框架数据
+        if not (hasattr(self, 'kline_history') and self.kline_history is not None and self.indicator_cache):
+            logger.warning(f"[{symbol}] [WARNING] Layer 2确认失败：缺少缓存数据")
+            return None
+
+        # 收集更高时间框架数据
+        symbol_higher_tf_data = self._collect_higher_timeframe_data(symbol)
+
+        # Layer 2确认
+        confirmed_signal = await self.mt_confirmator.confirm_breakout(
+            preliminary_signal,
+            symbol,
+            symbol_higher_tf_data
+        )
+
+        if confirmed_signal:
+            self.signal_stats['confirmed_signals'] += 1
+            logger.info(f"[{symbol}] [CONFIRMED] Layer 2确认通过: {confirmed_signal.signal_type.value}, "
+                       f"置信度: {preliminary_signal.confidence:.2f} → {confirmed_signal.confidence:.2f}")
+            return confirmed_signal
+        else:
+            logger.info(f"[{symbol}] [REJECTED] Layer 2确认未通过")
+            return None
+
+    def _collect_higher_timeframe_data(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """
+        收集更高时间框架的数据
+
+        Args:
+            symbol: 交易对符号
+
+        Returns:
+            包含15m和1h时间框架数据的字典
+        """
+        symbol_higher_tf_data = {}
+
+        # 安全检查
+        if self.kline_history is None:
+            return symbol_higher_tf_data
+
+        for tf in ['15m', '1h']:
+            if tf in self.kline_history and symbol in self.kline_history[tf]:
+                # 转换deque为DataFrame
+                history = list(self.kline_history[tf][symbol])
+                if len(history) > 0:
+                    df = self._deque_to_dataframe(history)
+                    symbol_higher_tf_data[tf] = df
+        return symbol_higher_tf_data
 
     # =========================================================================
     # 信号确认逻辑（Phase 2将被MultiTimeframeConfirmator替代）
@@ -898,7 +937,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         """
         [已废弃] 使用技术指标确认初步信号（同步版本，用于回测）
 
-        ⚠️ 重要架构变更：
+        重要架构变更：
 
         新架构（两层确认）：
         - Layer 1 (KlineBreakoutDetector): 纯粹的1s K线快速检测
@@ -1026,7 +1065,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
             if signal:
                 self.signal_stats['preliminary_signals'] += 1
                 logger.info(
-                    f"[{symbol}] ⚡ 快速检测突破信号: {signal.signal_type.value}, "
+                    f"[{symbol}] [DETECT] 快速检测突破信号: {signal.signal_type.value}, "
                     f"强度: {signal.confidence:.2f}"
                 )
 
@@ -1241,7 +1280,7 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
         try:
             # 检查是否有执行引擎
             if hasattr(self, 'execution_engine') and self.execution_engine:
-                logger.info(f"[{signal.symbol}] 📤 使用FastExecutionEngine执行信号: {signal.signal_type.value}")
+                logger.info(f"[{signal.symbol}] [EXEC] 使用FastExecutionEngine执行信号: {signal.signal_type.value}")
 
                 # 转换为ExecutionService的Signal格式
                 from core.models.signal import Signal as ExecSignal
@@ -1271,21 +1310,21 @@ class MultiTimeframeKlineBreakoutStrategy(BaseStrategy):
                     result = await self.execution_engine.execute_signal(exec_signal)
 
                     if result and result.is_successful():
-                        logger.info(f"[{signal.symbol}] ✅ 信号执行成功: {result.order_id if hasattr(result, 'order_id') else 'OK'}")
+                        logger.info(f"[{signal.symbol}] [SUCCESS] 信号执行成功: {result.order_id if hasattr(result, 'order_id') else 'OK'}")
                     else:
-                        logger.warning(f"[{signal.symbol}] ⚠️ 信号执行失败或被拒绝")
+                        logger.warning(f"[{signal.symbol}] [WARNING] 信号执行失败或被拒绝")
                 else:
-                    logger.warning(f"[{signal.symbol}] ⚠️ 不支持的信号类型: {signal.signal_type}")
+                    logger.warning(f"[{signal.symbol}] [WARNING] 不支持的信号类型: {signal.signal_type}")
 
             else:
                 # 没有执行引擎，记录信号但不执行（模拟模式）
-                logger.info(f"[{signal.symbol}] 📊 信号已生成（模拟模式，未执行）")
+                logger.info(f"[{signal.symbol}] [SIMULATION] 信号已生成（模拟模式，未执行）")
                 logger.info(f"   类型: {signal.signal_type.value}")
                 logger.info(f"   价格: {signal.price}")
                 logger.info(f"   数量: {signal.amount}")
                 logger.info(f"   置信度: {signal.confidence:.2f}")
 
         except Exception as e:
-            logger.error(f"[{signal.symbol}] ❌ 执行信号时出错: {e}")
+            logger.error(f"[{signal.symbol}] [ERROR] 执行信号时出错: {e}")
             import traceback
             logger.error(traceback.format_exc())
