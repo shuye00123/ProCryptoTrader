@@ -1,0 +1,175 @@
+# 多时间框架订阅器配置示例
+# 解决1秒K线订阅队列溢出问题
+
+# =====================================================
+# 基础配置
+# =====================================================
+subscriber:
+  # 交易对列表
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+
+  # 时间框架列表
+  timeframes:
+    - "1s"   # 1秒K线 (高频,需要大队列)
+    - "15m"  # 15分钟K线
+    - "1h"   # 1小时K线
+
+  # =====================================================
+  # 队列配置 (关键!)
+  # =====================================================
+  # SDK队列大小 - 解决BinanceWebsocketQueueOverflow
+  # 推荐: 1s K线使用10000+, 其他时间框架可使用1000
+  max_queue_size: 10000  # 🔥 关键配置
+
+  # =====================================================
+  # 重连配置
+  # =====================================================
+  # 最大重连次数
+  max_reconnect_attempts: 5
+
+  # 重连延迟(毫秒)
+  reconnect_delay_ms: 1000
+
+  # =====================================================
+  # 统计和监控
+  # =====================================================
+  # 启用统计信息收集
+  enable_stats: true
+
+  # 启用健康检查
+  enable_health_check: true
+
+  # 健康检查间隔(秒)
+  health_check_interval: 30
+
+# =====================================================
+# 处理器配置示例
+# =====================================================
+handlers:
+  # 1s K线处理器配置
+  "1s":
+    # 批量处理配置
+    enable_batch: true
+    batch_size: 100
+    batch_interval: 1.0  # 秒
+
+    # 性能配置
+    max_processing_time: 0.1  # 最大处理时间(秒),超过会警告
+
+    # 过滤配置
+    filters:
+      # 只处理闭合的K线
+      only_closed: true
+
+      # 最小成交量过滤
+      min_volume: 0.001
+
+  # 15m K线处理器配置
+  "15m":
+    enable_batch: false  # 低频数据不需要批量处理
+
+  # 1h K线处理器配置
+  "1h":
+    enable_batch: false
+
+# =====================================================
+# 性能优化配置
+# =====================================================
+performance:
+  # 消息处理线程池大小
+  worker_threads: 4
+
+  # 消息缓冲区大小
+  buffer_size: 1000
+
+  # 启用性能监控
+  enable_profiling: true
+
+  # 慢处理阈值(秒)
+  slow_threshold: 0.1
+
+# =====================================================
+# 日志配置
+# =====================================================
+logging:
+  level: INFO
+
+  # 记录详细统计信息
+  stats_interval: 60  # 每60秒记录一次
+
+  # 记录性能警告
+  performance_warnings: true
+
+# =====================================================
+# 告警配置
+# =====================================================
+alerts:
+  # 启用告警
+  enabled: true
+
+  # 告警规则
+  rules:
+    # 消息积压告警
+    message_backlog:
+      enabled: true
+      threshold: 1000  # 积压超过1000条告警
+
+    # 错误率告警
+    error_rate:
+      enabled: true
+      threshold: 0.1  # 错误率超过10%告警
+
+    # 处理延迟告警
+    processing_delay:
+      enabled: true
+      threshold: 0.5  # 处理延迟超过500ms告警
+
+  # 告警方式
+  channels:
+    - console  # 控制台输出
+    # - webhook  # Webhook推送 (需要配置webhook_url)
+    # - email    # 邮件通知 (需要配置smtp)
+
+# =====================================================
+# Webhook告警配置 (可选)
+# =====================================================
+# webhook:
+#   url: "https://your-webhook-url.com/alerts"
+#   timeout: 5
+#   retry_attempts: 3
+#   headers:
+#     Authorization: "Bearer YOUR_TOKEN"
+
+# =====================================================
+# 完整配置示例 (复制使用)
+# =====================================================
+# 生产环境推荐配置:
+# subscriber:
+#   symbols: ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+#   timeframes: ["1s", "15m", "1h"]
+#   max_queue_size: 10000        # 🔥 1s K线需要大队列
+#   max_reconnect_attempts: 5
+#   reconnect_delay_ms: 1000
+#   enable_stats: true
+#   enable_health_check: true
+#   health_check_interval: 30
+
+# 测试环境配置:
+# subscriber:
+#   symbols: ["BTCUSDT"]  # 只测试一个交易对
+#   timeframes: ["1s"]
+#   max_queue_size: 5000         # 测试环境使用较小队列
+#   enable_stats: true
+#   enable_health_check: true
+
+# 高频交易配置:
+# subscriber:
+#   symbols: ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+#   timeframes: ["1s", "5s"]  # 超高频订阅
+#   max_queue_size: 50000        # 🔥 超高频需要超大队列
+#   enable_stats: true
+#   enable_health_check: true
+#   health_check_interval: 10  # 更频繁的健康检查

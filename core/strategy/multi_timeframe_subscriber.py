@@ -67,10 +67,15 @@ class MultiTimeframeKlineSubscriber:
                 - max_reconnect_attempts: 最大重连次数 (默认5)
                 - reconnect_delay_ms: 重连延迟毫秒 (默认1000)
                 - enable_stats: 是否启用统计 (默认True)
+                - max_queue_size: SDK队列大小 (默认10000,解决队列溢出)
         """
         self.symbols = symbols
         self.timeframes = timeframes
         self.config = config or {}
+
+        # 🔥 队列大小配置（解决BinanceWebsocketQueueOverflow）
+        self.max_queue_size = self.config.get('max_queue_size', 10000)
+        logger.info(f"[MultiTimeframeSubscriber] 📦 SDK队列大小配置: {self.max_queue_size}")
 
         # WebSocket连接管理
         self.bsm = None  # BinanceSocketManager实例
@@ -185,7 +190,13 @@ class MultiTimeframeKlineSubscriber:
             client.https_proxy = None
             client.http_proxy = None
 
-            self.bsm = BinanceSocketManager(client)
+            # 🔥 创建BinanceSocketManager并传入队列大小配置
+            self.bsm = BinanceSocketManager(
+                client,
+                user_timeout=60,
+                max_queue_size=self.max_queue_size  # 🔥 关键配置：解决队列溢出
+            )
+            logger.info(f"[MultiTimeframeSubscriber] ✅ BinanceSocketManager已创建 (队列大小: {self.max_queue_size})")
             self.ws_running = True
 
             # 为每个时间框架创建订阅
@@ -281,11 +292,23 @@ class MultiTimeframeKlineSubscriber:
                             self.stats[timeframe]['messages_received'] += 1
                             self.stats[timeframe]['last_message_time'] = datetime.now()
 
+                        # 🔥 性能监控：记录处理开始时间
+                        import time
+                        process_start = time.time()
+
                         # 调用注册的处理器
                         if asyncio.iscoroutinefunction(handler):
                             await handler(msg)
                         else:
                             handler(msg)
+
+                        # 🔥 性能监控：记录处理时间
+                        process_time = time.time() - process_start
+                        if process_time > 0.1:  # 处理时间超过100ms警告
+                            logger.warning(
+                                f"[MultiTimeframeSubscriber] ⚠️ {timeframe}消息处理耗时过长: "
+                                f"{process_time*1000:.2f}ms (建议<100ms)"
+                            )
 
                         # 更新处理统计
                         if self.enable_stats:
